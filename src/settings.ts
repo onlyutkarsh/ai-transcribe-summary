@@ -458,7 +458,7 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 					toggle.setValue(this.plugin.settings.reuseWhisperKeyForSummary).onChange(async (value) => {
 						this.plugin.settings.reuseWhisperKeyForSummary = value;
 						await this.plugin.saveSettings();
-						apiKeySetting?.settingEl.toggleVisibility(!value);
+						apiKeySetting?.settingEl.toggle(!value);
 					})
 				);
 
@@ -474,7 +474,7 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 							await this.plugin.saveSettings();
 						})
 				);
-			apiKeySetting.settingEl.toggleVisibility(!this.plugin.settings.reuseWhisperKeyForSummary);
+			apiKeySetting.settingEl.toggle(!this.plugin.settings.reuseWhisperKeyForSummary);
 		} else {
 			new Setting(containerEl)
 				.setName(`${schema.label} API key`)
@@ -528,12 +528,12 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 				toggle.setValue(this.plugin.settings.generateSummary).onChange(async (value) => {
 					this.plugin.settings.generateSummary = value;
 					await this.plugin.saveSettings();
-					detailsEl?.toggleVisibility(value);
+					detailsEl?.toggle(value);
 				})
 			);
 
 		detailsEl = containerEl.createDiv();
-		detailsEl.toggleVisibility(this.plugin.settings.generateSummary);
+		detailsEl.toggle(this.plugin.settings.generateSummary);
 
 		new Setting(detailsEl)
 			.setName("Summary provider")
@@ -763,7 +763,7 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 
 		let folderSetting: Setting | undefined;
 		const updateFolderVisibility = () => {
-			folderSetting?.settingEl.toggleVisibility(this.plugin.settings.saveAudioFile);
+			folderSetting?.settingEl.toggle(this.plugin.settings.saveAudioFile);
 		};
 
 		new Setting(containerEl)
@@ -799,7 +799,7 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 
 		let folderSetting: Setting | undefined;
 		const updateFolderVisibility = () => {
-			folderSetting?.settingEl.toggleVisibility(this.plugin.settings.transcriptPlacement === "dedicated-file");
+			folderSetting?.settingEl.toggle(this.plugin.settings.transcriptPlacement === "dedicated-file");
 		};
 
 		new Setting(containerEl)
