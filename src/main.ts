@@ -1,5 +1,29 @@
-import { Plugin } from "obsidian";
+import { App, Menu, Modal, normalizePath, Notice, Plugin, Setting, TAbstractFile, TFile, TFolder } from "obsidian";
+import { AudioRecorder, RecordingResult } from "./audio/recorder";
+import { isAudioFile, runTranscribeAndSummarizePipeline } from "./pipeline";
 import { AiTranscribeSummarySettingTab, AiTranscribeSummarySettings, DEFAULT_SETTINGS } from "./settings";
+
+/** audio/webm -> webm, audio/ogg;codecs=opus -> ogg, etc. */
+function extensionForMimeType(mimeType: string): string {
+	const subtype = mimeType.split(";")[0].split("/")[1];
+	return subtype || "webm";
+}
+
+const EXTENSION_MIME_TYPES: Record<string, string> = {
+	webm: "audio/webm",
+	mp3: "audio/mpeg",
+	wav: "audio/wav",
+	m4a: "audio/mp4",
+};
+
+function mimeTypeForExtension(extension: string): string {
+	return EXTENSION_MIME_TYPES[extension.toLowerCase()] ?? "application/octet-stream";
+}
+
+function formatTimestampForFilename(date: Date): string {
+	const pad = (n: number) => n.toString().padStart(2, "0");
+	return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}-${pad(date.getMinutes())}-${pad(date.getSeconds())}`;
+}
 
 function formatElapsed(ms: number): string {
 	const totalSeconds = Math.floor(ms / 1000);
@@ -12,6 +36,33 @@ function formatElapsed(ms: number): string {
 
 type RecordingState = "idle" | "recording" | "paused";
 
+class StopRecordingConfirmModal extends Modal {
+	constructor(app: App, private onConfirm: () => void) {
+		super(app);
+	}
+
+	onOpen() {
+		this.setTitle("Stop recording?");
+		this.contentEl.createEl("p", { text: "This will end the current recording. This can't be undone." });
+
+		new Setting(this.contentEl)
+			.addButton((button) => button.setButtonText("Cancel").onClick(() => this.close()))
+			.addButton((button) =>
+				button
+					.setButtonText("Stop recording")
+					.setWarning()
+					.onClick(() => {
+						this.close();
+						this.onConfirm();
+					})
+			);
+	}
+
+	onClose() {
+		this.contentEl.empty();
+	}
+}
+
 export default class AiTranscribeSummaryPlugin extends Plugin {
 	declare settings: AiTranscribeSummarySettings;
 
@@ -21,6 +72,7 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 	private accumulatedMs = 0;
 	private timerIntervalId: number | undefined;
 	private ribbonIconEl!: HTMLElement;
+	private recorder = new AudioRecorder();
 
 	async onload() {
 		await this.loadSettings();
@@ -29,7 +81,11 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 		this.statusBarItem.hide();
 
 		this.ribbonIconEl = this.addRibbonIcon("mic", "Start meeting recording", () => {
-			this.toggleRecording();
+			if (this.state === "idle") {
+				void this.startRecording();
+			} else {
+				this.requestStopRecording();
+			}
 		});
 
 		this.addCommand({
@@ -37,7 +93,7 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 			name: "Start recording",
 			checkCallback: (checking) => {
 				if (this.state !== "idle") return false;
-				if (!checking) this.startRecording();
+				if (!checking) void this.startRecording();
 				return true;
 			},
 		});
@@ -47,7 +103,7 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 			name: "Stop recording",
 			checkCallback: (checking) => {
 				if (this.state === "idle") return false;
-				if (!checking) this.stopRecording();
+				if (!checking) this.requestStopRecording();
 				return true;
 			},
 		});
@@ -63,17 +119,61 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 		});
 
 		this.addSettingTab(new AiTranscribeSummarySettingTab(this.app, this));
+
+		this.registerEvent(this.app.workspace.on("file-menu", (menu, file) => this.onFileMenu(menu, file)));
+	}
+
+	private onFileMenu(menu: Menu, file: TAbstractFile) {
+		if (!(file instanceof TFile) || !isAudioFile(file)) return;
+
+		menu.addItem((item) =>
+			item
+				.setTitle("Transcribe & summarize")
+				.setIcon("captions")
+				.onClick(() => void this.transcribeAndSummarizeFile(file))
+		);
+	}
+
+	private async transcribeAndSummarizeFile(file: TFile): Promise<void> {
+		try {
+			const blob = new Blob([await this.app.vault.readBinary(file)], { type: mimeTypeForExtension(file.extension) });
+			await runTranscribeAndSummarizePipeline(
+				this.app,
+				this.settings,
+				{ blob, mimeType: blob.type, baseName: file.basename },
+				{ insertIntoActiveNote: false, onProgress: (status) => this.showPipelineProgress(status) }
+			);
+		} catch (error) {
+			console.error("ai-transcribe-summary: transcribe & summarize failed", error);
+			new Notice(`Transcribe & summarize failed: ${error instanceof Error ? error.message : String(error)}`);
+		} finally {
+			this.hidePipelineProgress();
+		}
+	}
+
+	private showPipelineProgress(status: string) {
+		this.statusBarItem.setText(status);
+		this.statusBarItem.show();
+	}
+
+	private hidePipelineProgress() {
+		if (this.state === "idle") {
+			this.statusBarItem.hide();
+		}
 	}
 
 	onunload() {
 		this.stopTimer();
+		if (this.state !== "idle") {
+			this.recorder.discard();
+		}
 	}
 
-	private toggleRecording() {
-		if (this.state === "idle") {
-			this.startRecording();
+	private requestStopRecording() {
+		if (this.settings.confirmBeforeStoppingRecording) {
+			new StopRecordingConfirmModal(this.app, () => void this.stopRecording()).open();
 		} else {
-			this.stopRecording();
+			void this.stopRecording();
 		}
 	}
 
@@ -85,8 +185,18 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 		}
 	}
 
-	private startRecording() {
-		// TODO: wire up actual audio capture via provider abstraction layer (Tier 2)
+	private async startRecording() {
+		try {
+			await this.recorder.start({
+				microphoneDeviceId: this.settings.microphoneDeviceId,
+				bitrateKbps: this.settings.audioBitrateKbps,
+			});
+		} catch (error) {
+			console.error("ai-transcribe-summary: failed to start recording", error);
+			new Notice("Could not start recording - check microphone permissions.");
+			return;
+		}
+
 		this.state = "recording";
 		this.accumulatedMs = 0;
 		this.segmentStartedAt = Date.now();
@@ -100,6 +210,7 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 	}
 
 	private pauseRecording() {
+		this.recorder.pause();
 		this.accumulatedMs += Date.now() - this.segmentStartedAt;
 		this.state = "paused";
 		this.stopTimer();
@@ -107,20 +218,74 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 	}
 
 	private resumeRecording() {
+		this.recorder.resume();
 		this.segmentStartedAt = Date.now();
 		this.state = "recording";
 		this.updateStatusBar();
 		this.startTimer();
 	}
 
-	private stopRecording() {
+	private async stopRecording() {
 		this.state = "idle";
 		this.stopTimer();
 
 		this.ribbonIconEl.removeClass("is-active");
 		this.ribbonIconEl.setAttribute("aria-label", "Start meeting recording");
 
-		this.statusBarItem.hide();
+		let result: RecordingResult;
+		try {
+			result = await this.recorder.stop();
+		} catch (error) {
+			console.error("ai-transcribe-summary: failed to stop recording", error);
+			new Notice("Recording stop failed - no audio was saved.");
+			this.statusBarItem.hide();
+			return;
+		}
+
+		// Raw audio is always preserved regardless of what transcription/summary do downstream.
+		let savedFile: TFile | undefined;
+		if (this.settings.saveAudioFile) {
+			savedFile = await this.saveRecording(result);
+		}
+
+		try {
+			await runTranscribeAndSummarizePipeline(
+				this.app,
+				this.settings,
+				{ blob: result.blob, mimeType: result.mimeType, baseName: savedFile?.basename ?? `meeting ${formatTimestampForFilename(new Date())}` },
+				{ insertIntoActiveNote: true, onProgress: (status) => this.showPipelineProgress(status) }
+			);
+		} catch (error) {
+			console.error("ai-transcribe-summary: transcribe & summarize failed", error);
+			new Notice(`Transcribe & summarize failed: ${error instanceof Error ? error.message : String(error)}`);
+		} finally {
+			this.hidePipelineProgress();
+		}
+	}
+
+	private async saveRecording(result: RecordingResult): Promise<TFile | undefined> {
+		const folderPath = normalizePath(this.settings.audioFolder);
+		const existingFolder = this.app.vault.getAbstractFileByPath(folderPath);
+		if (!existingFolder) {
+			await this.app.vault.createFolder(folderPath);
+		} else if (!(existingFolder instanceof TFolder)) {
+			new Notice(`Audio folder "${folderPath}" is not a folder - recording not saved.`);
+			return undefined;
+		}
+
+		const extension = extensionForMimeType(result.mimeType);
+		const filePath = normalizePath(`${folderPath}/meeting ${formatTimestampForFilename(new Date())}.${extension}`);
+
+		try {
+			const arrayBuffer = await result.blob.arrayBuffer();
+			const file = await this.app.vault.createBinary(filePath, arrayBuffer);
+			new Notice(`Recording saved to ${filePath}`);
+			return file;
+		} catch (error) {
+			console.error("ai-transcribe-summary: failed to save recording", error);
+			new Notice("Failed to save recording audio file - see console for details.");
+			return undefined;
+		}
 	}
 
 	private startTimer() {

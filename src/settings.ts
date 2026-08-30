@@ -45,6 +45,15 @@ export type WhisperModelId =
 export type AssemblyAiModelId = "universal-2" | "universal-3.5-pro";
 export type TranscriptPlacement = "same-note" | "dedicated-file";
 
+/** Recording bitrate in kbps, per PRD Tier 2 ("32kbps default bitrate"). Kept as a closed set - MediaRecorder accepts arbitrary values, but only these are exposed. */
+export type AudioBitrateKbps = 32 | 64 | 128;
+
+export const AUDIO_BITRATE_OPTIONS: { value: AudioBitrateKbps; label: string }[] = [
+	{ value: 32, label: "32 kbps (default - smallest files)" },
+	{ value: 64, label: "64 kbps (better quality, ~2x file size)" },
+	{ value: 128, label: "128 kbps (best quality, ~4x file size)" },
+];
+
 interface WhisperModelOption {
 	id: WhisperModelId;
 	label: string;
@@ -78,6 +87,16 @@ export function resolveWhisperModelOption(id: WhisperModelId): WhisperModelOptio
 		throw new Error(`Unknown Whisper model id: ${id}`);
 	}
 	return option;
+}
+
+/**
+ * Which host the current Whisper key belongs to, based on its Model
+ * dropdown (whisper-1-openai vs. the whisper-*-openrouter options) - "reuse
+ * Whisper key" is only ever valid for the one summary provider matching
+ * that host, never both, and never anthropic/google.
+ */
+export function whisperKeyReuseTarget(settings: AiTranscribeSummarySettings): "openai" | "openrouter" {
+	return settings.providers.whisper.model === "whisper-1-openai" ? "openai" : "openrouter";
 }
 
 /**
@@ -125,14 +144,27 @@ export interface AiTranscribeSummarySettings {
 	summaryProvider: SummaryProviderId;
 	summaryProviders: SummaryProviderSettingsMap;
 	summaryPrompt: string;
+	/** When off, the pipeline stops after transcription - transcript is saved, no LLM call is made and no summary note is created. */
+	generateSummary: boolean;
+	/**
+	 * Use providers.whisper.apiKey for summary generation instead of the
+	 * selected summary provider's own key. Only takes effect when the
+	 * selected summary provider matches the host Whisper is actually
+	 * configured against (see whisperKeyReuseTarget) - e.g. if Whisper is set
+	 * to an OpenRouter model, this only applies when summaryProvider is also
+	 * "openrouter", never "openai".
+	 */
+	reuseWhisperKeyForSummary: boolean;
 
 	// Custom vocabulary hints
 	vocabularyHints: string;
 
 	// Recording behavior
 	microphoneDeviceId: string;
+	audioBitrateKbps: AudioBitrateKbps;
 	silenceAutoStopMinutes: number;
 	maxRecordingHours: number;
+	confirmBeforeStoppingRecording: boolean;
 
 	// Output: raw audio
 	saveAudioFile: boolean;
@@ -170,12 +202,16 @@ export const DEFAULT_SETTINGS: AiTranscribeSummarySettings = {
 		google: { apiKey: "", model: "gemini-2.5-flash", baseUrl: GOOGLE_BASE_URL },
 	},
 	summaryPrompt: DEFAULT_SUMMARY_PROMPT,
+	generateSummary: true,
+	reuseWhisperKeyForSummary: false,
 
 	vocabularyHints: "",
 
 	microphoneDeviceId: "",
+	audioBitrateKbps: 32,
 	silenceAutoStopMinutes: 5,
 	maxRecordingHours: 3,
+	confirmBeforeStoppingRecording: false,
 
 	saveAudioFile: true,
 	audioFolder: "_meetings/audio",
@@ -319,14 +355,14 @@ const SUMMARY_PROVIDER_SCHEMA: Record<SummaryProviderId, SummaryProviderSchemaEn
 		modelPlaceholder: "openai/gpt-4o-mini",
 	},
 	anthropic: {
-		label: "Anthropic",
-		description: "Uses the Anthropic Messages API directly.",
+		label: "Anthropic (not yet implemented)",
+		description: "Uses the Anthropic Messages API directly. Not implemented yet - selecting this will fail when you try to generate a summary.",
 		apiKeyPlaceholder: "sk-ant-...",
 		modelPlaceholder: "claude-haiku-4-5",
 	},
 	google: {
-		label: "Google",
-		description: "Uses the Gemini API (OpenAI-compatible endpoint).",
+		label: "Google (not yet implemented)",
+		description: "Uses the Gemini API (OpenAI-compatible endpoint). Not implemented yet - selecting this will fail when you try to generate a summary.",
 		apiKeyPlaceholder: "AIza...",
 		modelPlaceholder: "gemini-2.5-flash",
 	},
@@ -349,9 +385,6 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 		containerEl.empty();
 
 		this.renderProviderSection(containerEl);
-		for (const providerId of PROVIDER_ORDER) {
-			this.renderProviderSettings(containerEl, providerId);
-		}
 		this.renderSummarySection(containerEl);
 		this.renderVocabularySection(containerEl);
 		this.renderRecordingSection(containerEl);
@@ -362,8 +395,8 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 		new Setting(containerEl).setName("Transcription provider").setHeading();
 
 		new Setting(containerEl)
-			.setName("Default Provider")
-			.setDesc("Selects which TranscriptionProvider implementation is used by default. Can be overridden per-attempt on right-click retry.")
+			.setName("Transcription provider")
+			.setDesc("Which service turns your recording's audio into text. Used both for live recordings and the right-click \"Transcribe & summarize\" action.")
 			.addDropdown((dropdown) => {
 				for (const providerId of PROVIDER_ORDER) {
 					dropdown.addOption(providerId, PROVIDER_SETTINGS_SCHEMA[providerId].label);
@@ -371,13 +404,19 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 				dropdown.setValue(this.plugin.settings.transcriptionProvider).onChange(async (value) => {
 					this.plugin.settings.transcriptionProvider = value as TranscriptionProviderId;
 					await this.plugin.saveSettings();
+					this.renderProviderSettings(providerFieldsEl, this.plugin.settings.transcriptionProvider);
 				});
 			});
+
+		const providerFieldsEl = containerEl.createDiv();
+		this.renderProviderSettings(providerFieldsEl, this.plugin.settings.transcriptionProvider);
 	}
 
+	/** Renders only the selected transcription provider's settings - the other provider's fields are hidden, not just visually de-emphasized, since only one is ever active. */
 	private renderProviderSettings(containerEl: HTMLElement, providerId: TranscriptionProviderId): void {
+		containerEl.empty();
+
 		const schema = PROVIDER_SETTINGS_SCHEMA[providerId];
-		new Setting(containerEl).setName(schema.label).setHeading();
 		containerEl.createEl("p", { text: schema.description, cls: "setting-item-description" });
 
 		const onChange = async () => {
@@ -403,18 +442,53 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 		const schema = SUMMARY_PROVIDER_SCHEMA[providerId];
 		const settings = this.plugin.settings.summaryProviders[providerId];
 
-		new Setting(containerEl)
-			.setName(`${schema.label} API key`)
-			.setDesc(schema.description)
-			.addText((text) =>
-				makeSecret(text)
-					.setPlaceholder(schema.apiKeyPlaceholder)
-					.setValue(settings.apiKey)
-					.onChange(async (value) => {
-						settings.apiKey = value;
+		// Whisper's key can only be reused for the one summary provider matching
+		// the host Whisper is actually configured against (see
+		// whisperKeyReuseTarget) - e.g. never offer it for "openai" while
+		// Whisper is set to an OpenRouter model, since that key would be sent to
+		// the wrong host and fail.
+		const reuseTarget = whisperKeyReuseTarget(this.plugin.settings);
+		if ((providerId === "openai" || providerId === "openrouter") && providerId === reuseTarget) {
+			const reuseHostLabel = reuseTarget === "openai" ? "OpenAI" : "OpenRouter";
+			let apiKeySetting: Setting | undefined;
+			new Setting(containerEl)
+				.setName(`Reuse Whisper (${reuseHostLabel}) API key`)
+				.setDesc(`Whisper is currently configured to call ${reuseHostLabel} - reuse that same key for summary generation instead of a separate key here.`)
+				.addToggle((toggle) =>
+					toggle.setValue(this.plugin.settings.reuseWhisperKeyForSummary).onChange(async (value) => {
+						this.plugin.settings.reuseWhisperKeyForSummary = value;
 						await this.plugin.saveSettings();
+						apiKeySetting?.settingEl.toggleVisibility(!value);
 					})
-			);
+				);
+
+			apiKeySetting = new Setting(containerEl)
+				.setName(`${schema.label} API key`)
+				.setDesc(schema.description)
+				.addText((text) =>
+					makeSecret(text)
+						.setPlaceholder(schema.apiKeyPlaceholder)
+						.setValue(settings.apiKey)
+						.onChange(async (value) => {
+							settings.apiKey = value;
+							await this.plugin.saveSettings();
+						})
+				);
+			apiKeySetting.settingEl.toggleVisibility(!this.plugin.settings.reuseWhisperKeyForSummary);
+		} else {
+			new Setting(containerEl)
+				.setName(`${schema.label} API key`)
+				.setDesc(schema.description)
+				.addText((text) =>
+					makeSecret(text)
+						.setPlaceholder(schema.apiKeyPlaceholder)
+						.setValue(settings.apiKey)
+						.onChange(async (value) => {
+							settings.apiKey = value;
+							await this.plugin.saveSettings();
+						})
+				);
+		}
 
 		new Setting(containerEl)
 			.setName("Model")
@@ -446,8 +520,23 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 	private renderSummarySection(containerEl: HTMLElement): void {
 		new Setting(containerEl).setName("Summary generation").setHeading();
 
+		let detailsEl: HTMLElement | undefined;
 		new Setting(containerEl)
-			.setName("Provider")
+			.setName("Generate summary after transcription")
+			.setDesc("When off, recording/retry stops after transcription - the transcript is saved but no LLM call is made and no summary note is created.")
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.generateSummary).onChange(async (value) => {
+					this.plugin.settings.generateSummary = value;
+					await this.plugin.saveSettings();
+					detailsEl?.toggleVisibility(value);
+				})
+			);
+
+		detailsEl = containerEl.createDiv();
+		detailsEl.toggleVisibility(this.plugin.settings.generateSummary);
+
+		new Setting(detailsEl)
+			.setName("Summary provider")
 			.setDesc("Which LLM provider generates the structured summary from the transcript.")
 			.addDropdown((dropdown) => {
 				for (const providerId of SUMMARY_PROVIDER_ORDER) {
@@ -460,11 +549,11 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 				});
 			});
 
-		const providerFieldsEl = containerEl.createDiv();
+		const providerFieldsEl = detailsEl.createDiv();
 		this.renderSummaryProviderFields(providerFieldsEl, this.plugin.settings.summaryProvider);
 
 		let promptTextArea: TextAreaComponent | undefined;
-		new Setting(containerEl)
+		new Setting(detailsEl)
 			.setClass("ai-transcribe-summary-prompt-setting")
 			.setName("Summary prompt")
 			.setDesc(
@@ -483,7 +572,7 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 				text.inputEl.addClass("ai-transcribe-summary-prompt");
 			});
 
-		new Setting(containerEl)
+		new Setting(detailsEl)
 			.setClass("ai-transcribe-summary-prompt-reset")
 			.addButton((button) =>
 				button
@@ -606,6 +695,19 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 		this.renderMicrophoneSetting(containerEl);
 
 		new Setting(containerEl)
+			.setName("Audio bitrate")
+			.setDesc("Recording quality vs. file size. Lower bitrates keep recordings under Whisper's 25MB ceiling for longer before chunking kicks in.")
+			.addDropdown((dropdown) => {
+				for (const option of AUDIO_BITRATE_OPTIONS) {
+					dropdown.addOption(String(option.value), option.label);
+				}
+				dropdown.setValue(String(this.plugin.settings.audioBitrateKbps)).onChange(async (value) => {
+					this.plugin.settings.audioBitrateKbps = Number(value) as AudioBitrateKbps;
+					await this.plugin.saveSettings();
+				});
+			});
+
+		new Setting(containerEl)
 			.setName("Silence auto-stop (minutes)")
 			.setDesc("Recording auto-stops after this many minutes of near-silence.")
 			.addText((text) =>
@@ -635,6 +737,16 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 							await this.plugin.saveSettings();
 						}
 					})
+			);
+
+		new Setting(containerEl)
+			.setName("Confirm before stopping")
+			.setDesc("Ask for confirmation before stopping an in-progress recording, to guard against an accidental click or hotkey press.")
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.confirmBeforeStoppingRecording).onChange(async (value) => {
+					this.plugin.settings.confirmBeforeStoppingRecording = value;
+					await this.plugin.saveSettings();
+				})
 			);
 	}
 
