@@ -1,6 +1,6 @@
 import { App, MarkdownView, normalizePath, Notice, TFile, TFolder } from "obsidian";
 import { createSummaryProvider, createTranscriptionProvider, resolveSummaryApiKey } from "./providers/factory";
-import { AiTranscribeSummarySettings, whisperKeyReuseTarget } from "./settings";
+import { AiTranscribeSummarySettings, transcriptionKeyReuseTarget } from "./settings";
 
 const LOG_PREFIX = "ai-transcribe-summary:";
 
@@ -25,24 +25,18 @@ export type ProgressCallback = (status: string) => void;
 
 /** Checks required API keys are set before any request is made, so a misconfigured provider fails immediately with a clear message instead of mid-upload. */
 export function validatePipelineConfig(settings: AiTranscribeSummarySettings): string | undefined {
-	if (settings.transcriptionProvider === "whisper" && !settings.providers.whisper.apiKey) {
-		return 'Whisper API key is not set. Add it in Settings under "Whisper (OpenAI / OpenRouter)", or switch the transcription provider.';
-	}
-	if (settings.transcriptionProvider === "assemblyai" && !settings.providers.assemblyai.apiKey) {
-		return 'AssemblyAI API key is not set. Add it in Settings under "AssemblyAI", or switch the transcription provider.';
+	const transcriptionConfig = settings.providers[settings.transcriptionProvider];
+	if (!transcriptionConfig.apiKey) {
+		const label = settings.transcriptionProvider === "openai" ? "OpenAI" : "OpenRouter";
+		return `${label} API key is not set. Add it in Settings under "${label}", or switch the transcription provider.`;
 	}
 
 	if (settings.generateSummary || settings.cleanupTranscript) {
-		if (settings.summaryProvider === "anthropic" || settings.summaryProvider === "google") {
-			const label = settings.summaryProvider === "anthropic" ? "Anthropic" : "Google";
-			return `${label} summary generation is not implemented yet. Select OpenAI or OpenRouter in Settings under "Summary generation", or turn off "Generate summary after transcription"${settings.cleanupTranscript ? ' and "Clean up transcript"' : ""}.`;
-		}
-
 		const effectiveApiKey = resolveSummaryApiKey(settings, settings.summaryProvider);
 		if (!effectiveApiKey) {
-			const isReusingWhisperKey = settings.reuseWhisperKeyForSummary && whisperKeyReuseTarget(settings) === settings.summaryProvider;
-			const hint = isReusingWhisperKey
-				? '"Reuse Whisper API key" is on but the Whisper API key is also empty - set one of the two'
+			const isReusingTranscriptionKey = settings.reuseWhisperKeyForSummary && transcriptionKeyReuseTarget(settings) === settings.summaryProvider;
+			const hint = isReusingTranscriptionKey
+				? '"Reuse transcription API key" is on but the transcription API key is also empty - set one of the two'
 				: `Add it in Settings under "Summary generation"`;
 			const feature = settings.generateSummary ? "Summary generation" : "Transcript cleanup";
 			return `${feature} is on but the ${settings.summaryProvider} API key is not set. ${hint}, or turn off "Generate summary after transcription"${settings.cleanupTranscript ? ' / "Clean up transcript"' : ""}.`;

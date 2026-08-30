@@ -11,8 +11,6 @@ function makeSecret(text: TextComponent): TextComponent {
 
 export const OPENAI_BASE_URL = "https://api.openai.com/v1";
 export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
-export const ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1";
-export const GOOGLE_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai";
 
 export const DEFAULT_SUMMARY_PROMPT = `You are summarizing a meeting transcript. Produce a structured, Teams-Copilot-style summary with these sections, in this order:
 
@@ -43,16 +41,8 @@ export const DEFAULT_CLEANUP_PROMPT = `You are cleaning up a raw speech-to-text 
 
 Output only the cleaned transcript text, nothing else.`;
 
-export type TranscriptionProviderId = "whisper" | "assemblyai";
+export type TranscriptionProviderId = "openai" | "openrouter";
 
-/** Each entry is one model as served by one host - the two are picked together, not independently. */
-export type WhisperModelId =
-	| "whisper-1-openai"
-	| "whisper-1-openrouter"
-	| "whisper-large-v3-openrouter"
-	| "whisper-large-v3-turbo-openrouter";
-
-export type AssemblyAiModelId = "universal-2" | "universal-3.5-pro";
 export type TranscriptPlacement = "same-note" | "dedicated-file";
 
 /** Recording bitrate in kbps, per PRD Tier 2 ("32kbps default bitrate"). Kept as a closed set - MediaRecorder accepts arbitrary values, but only these are exposed. */
@@ -64,72 +54,49 @@ export const AUDIO_BITRATE_OPTIONS: { value: AudioBitrateKbps; label: string }[]
 	{ value: 128, label: "128 kbps (best quality, ~4x file size)" },
 ];
 
-interface WhisperModelOption {
-	id: WhisperModelId;
-	label: string;
-	/** Model name as sent to the API - distinct from `id`, which also encodes the host. */
-	apiModel: string;
-	/** Prefilled into the (editable) Base URL field when this model is selected. */
-	defaultBaseUrl: string;
-}
+export const OPENAI_DEFAULT_MODEL = "whisper-1";
 
-/** Source of truth for the Model dropdown, and for resolving an id to its apiModel + default base URL. */
-export const WHISPER_MODEL_OPTIONS: WhisperModelOption[] = [
-	{ id: "whisper-1-openai", label: "whisper-1 (OpenAI)", apiModel: "whisper-1", defaultBaseUrl: OPENAI_BASE_URL },
-	{ id: "whisper-1-openrouter", label: "whisper-1 (OpenRouter)", apiModel: "whisper-1", defaultBaseUrl: OPENROUTER_BASE_URL },
-	{
-		id: "whisper-large-v3-openrouter",
-		label: "whisper-large-v3 (OpenRouter)",
-		apiModel: "whisper-large-v3",
-		defaultBaseUrl: OPENROUTER_BASE_URL,
-	},
-	{
-		id: "whisper-large-v3-turbo-openrouter",
-		label: "whisper-large-v3-turbo (OpenRouter)",
-		apiModel: "whisper-large-v3-turbo",
-		defaultBaseUrl: OPENROUTER_BASE_URL,
-	},
-];
-
-export function resolveWhisperModelOption(id: WhisperModelId): WhisperModelOption {
-	const option = WHISPER_MODEL_OPTIONS.find((candidate) => candidate.id === id);
-	if (!option) {
-		throw new Error(`Unknown Whisper model id: ${id}`);
-	}
-	return option;
-}
+/** OpenRouter model ids are provider-prefixed (e.g. "openai/whisper-1"), unlike OpenAI's bare "whisper-1" - see OPENROUTER_MODELS_URL for where the exact id string is shown. */
+export const OPENROUTER_DEFAULT_MODEL = "openai/whisper-1";
 
 /**
- * Which host the current Whisper key belongs to, based on its Model
- * dropdown (whisper-1-openai vs. the whisper-*-openrouter options) - "reuse
- * Whisper key" is only ever valid for the one summary provider matching
- * that host, never both, and never anthropic/google.
+ * OpenRouter's model list/collection pages only show display names, not the
+ * id string to paste - that appears on each model's own page (header +
+ * Quick Start code sample), which also links to similar models for
+ * browsing. Points at the default model's page as a concrete example.
  */
-export function whisperKeyReuseTarget(settings: AiTranscribeSummarySettings): "openai" | "openrouter" {
-	return settings.providers.whisper.model === "whisper-1-openai" ? "openai" : "openrouter";
-}
+export const OPENROUTER_MODELS_URL = "https://openrouter.ai/openai/whisper-1";
 
 /**
- * Per-provider settings, keyed by TranscriptionProviderId. Mirrors the
- * TranscriptionProvider abstraction from the PRD (Whisper / AssemblyAI as
- * interchangeable implementations) so a new provider is one new key here
- * plus one new entry in PROVIDER_SETTINGS_SCHEMA, not a scattering of
- * top-level fields.
+ * Per-provider settings, keyed by TranscriptionProviderId. OpenAI and
+ * OpenRouter are both Whisper-compatible hosts, exposed as separate
+ * providers (each with its own key/model/base URL) rather than one
+ * "Whisper" provider with a host picker, mirroring SummaryProviderSettingsMap.
  */
 export interface TranscriptionProviderSettingsMap {
-	whisper: {
+	openai: {
 		apiKey: string;
-		model: WhisperModelId;
-		/** Editable; prefilled from the selected model's default base URL but can be overridden (e.g. a proxy or self-hosted endpoint). */
+		model: string;
 		baseUrl: string;
 	};
-	assemblyai: {
+	openrouter: {
 		apiKey: string;
-		model: AssemblyAiModelId;
+		model: string;
+		baseUrl: string;
 	};
 }
 
-export type SummaryProviderId = "openai" | "openrouter" | "anthropic" | "google";
+/**
+ * Which transcription provider (if any) the given summary provider can reuse
+ * the transcription API key from - "reuse transcription key" is only ever
+ * valid when the summary provider is the same host the transcription
+ * provider is already configured against.
+ */
+export function transcriptionKeyReuseTarget(settings: AiTranscribeSummarySettings): TranscriptionProviderId {
+	return settings.transcriptionProvider;
+}
+
+export type SummaryProviderId = "openai" | "openrouter";
 
 /**
  * Per-provider settings for summary generation, keyed by SummaryProviderId.
@@ -141,8 +108,6 @@ export type SummaryProviderId = "openai" | "openrouter" | "anthropic" | "google"
 export interface SummaryProviderSettingsMap {
 	openai: { apiKey: string; model: string; baseUrl: string; temperature: number };
 	openrouter: { apiKey: string; model: string; baseUrl: string; temperature: number };
-	anthropic: { apiKey: string; model: string; baseUrl: string; temperature: number };
-	google: { apiKey: string; model: string; baseUrl: string; temperature: number };
 }
 
 /** Lower than the API default (usually 1.0) - summarization should stay close to the transcript, not get creative. */
@@ -160,20 +125,20 @@ export interface AiTranscribeSummarySettings {
 	/** When off, the pipeline stops after transcription - transcript is saved, no LLM call is made and no summary note is created. */
 	generateSummary: boolean;
 	/**
-	 * Use providers.whisper.apiKey for summary generation instead of the
-	 * selected summary provider's own key. Only takes effect when the
-	 * selected summary provider matches the host Whisper is actually
-	 * configured against (see whisperKeyReuseTarget) - e.g. if Whisper is set
-	 * to an OpenRouter model, this only applies when summaryProvider is also
-	 * "openrouter", never "openai".
+	 * Use the transcription provider's own apiKey for summary generation
+	 * instead of the selected summary provider's key. Only takes effect when
+	 * the selected summary provider matches the currently selected
+	 * transcriptionProvider (see transcriptionKeyReuseTarget) - e.g. if
+	 * transcriptionProvider is "openrouter", this only applies when
+	 * summaryProvider is also "openrouter", never "openai".
 	 */
 	reuseWhisperKeyForSummary: boolean;
 
 	/**
-	 * Optional LLM cleanup pass over the raw Whisper/AssemblyAI transcript
-	 * (filler words, false starts, grammar) before it's saved or fed into
-	 * summary generation. Uses the same provider/model/key already configured
-	 * for summaryProvider - no separate provider selection.
+	 * Optional LLM cleanup pass over the raw transcript (filler words, false
+	 * starts, grammar) before it's saved or fed into summary generation. Uses
+	 * the same provider/model/key already configured for summaryProvider - no
+	 * separate provider selection.
 	 */
 	cleanupTranscript: boolean;
 	cleanupPrompt: string;
@@ -203,16 +168,17 @@ export interface AiTranscribeSummarySettings {
 }
 
 export const DEFAULT_SETTINGS: AiTranscribeSummarySettings = {
-	transcriptionProvider: "whisper",
+	transcriptionProvider: "openrouter",
 	providers: {
-		whisper: {
+		openai: {
 			apiKey: "",
-			model: "whisper-1-openai",
+			model: OPENAI_DEFAULT_MODEL,
 			baseUrl: OPENAI_BASE_URL,
 		},
-		assemblyai: {
+		openrouter: {
 			apiKey: "",
-			model: "universal-2",
+			model: OPENROUTER_DEFAULT_MODEL,
+			baseUrl: OPENROUTER_BASE_URL,
 		},
 	},
 
@@ -220,8 +186,6 @@ export const DEFAULT_SETTINGS: AiTranscribeSummarySettings = {
 	summaryProviders: {
 		openai: { apiKey: "", model: "gpt-4o-mini", baseUrl: OPENAI_BASE_URL, temperature: DEFAULT_SUMMARY_TEMPERATURE },
 		openrouter: { apiKey: "", model: "openai/gpt-4o-mini", baseUrl: OPENROUTER_BASE_URL, temperature: DEFAULT_SUMMARY_TEMPERATURE },
-		anthropic: { apiKey: "", model: "claude-haiku-4-5", baseUrl: ANTHROPIC_BASE_URL, temperature: DEFAULT_SUMMARY_TEMPERATURE },
-		google: { apiKey: "", model: "gemini-2.5-flash", baseUrl: GOOGLE_BASE_URL, temperature: DEFAULT_SUMMARY_TEMPERATURE },
 	},
 	summaryPrompt: DEFAULT_SUMMARY_PROMPT,
 	generateSummary: true,
@@ -262,10 +226,10 @@ interface ProviderSettingsSchema<K extends TranscriptionProviderId> {
 const PROVIDER_SETTINGS_SCHEMA: {
 	[K in TranscriptionProviderId]: ProviderSettingsSchema<K>;
 } = {
-	whisper: {
-		id: "whisper",
-		label: "Whisper (OpenAI / OpenRouter)",
-		description: "Default provider. 25MB size ceiling, handled via silence-aware chunking.",
+	openai: {
+		id: "openai",
+		label: "OpenAI",
+		description: "Uses the OpenAI Whisper transcription API directly. 25MB size ceiling, handled via silence-aware chunking.",
 		render: (containerEl, settings, onChange) => {
 			new Setting(containerEl)
 				.setName("API key")
@@ -280,56 +244,44 @@ const PROVIDER_SETTINGS_SCHEMA: {
 						})
 				);
 
-			let baseUrlText: TextComponent | undefined;
-			const knownDefaultBaseUrls = new Set(WHISPER_MODEL_OPTIONS.map((option) => option.defaultBaseUrl));
-
 			new Setting(containerEl)
 				.setName("Model")
-				.setDesc("Picks both the model and the default host it's called through. OpenRouter is typically cheaper and also proxies whisper-1.")
-				.addDropdown((dropdown) => {
-					for (const option of WHISPER_MODEL_OPTIONS) {
-						dropdown.addOption(option.id, option.label);
-					}
-					dropdown.setValue(settings.model).onChange(async (value) => {
-						settings.model = value as WhisperModelId;
-
-						// Prefill the base URL for the new model, but only if it still holds a
-						// known default - a manually customized endpoint is left untouched.
-						if (knownDefaultBaseUrls.has(settings.baseUrl)) {
-							settings.baseUrl = resolveWhisperModelOption(settings.model).defaultBaseUrl;
-							baseUrlText?.setValue(settings.baseUrl);
-						}
-
-						await onChange();
-					});
-				});
+				.setDesc("Whisper model used for transcription.")
+				.addText((text) =>
+					text
+						.setPlaceholder(OPENAI_DEFAULT_MODEL)
+						.setValue(settings.model)
+						.onChange(async (value) => {
+							settings.model = value || OPENAI_DEFAULT_MODEL;
+							await onChange();
+						})
+				);
 
 			new Setting(containerEl)
 				.setName("Base URL")
-				.setDesc("Prefilled from the model selection above. Edit directly to point at a proxy or self-hosted endpoint.")
-				.addText((text) => {
-					baseUrlText = text;
+				.setDesc("Edit directly to point at a proxy or self-hosted endpoint.")
+				.addText((text) =>
 					text
 						.setPlaceholder(OPENAI_BASE_URL)
 						.setValue(settings.baseUrl)
 						.onChange(async (value) => {
-							settings.baseUrl = value || resolveWhisperModelOption(settings.model).defaultBaseUrl;
+							settings.baseUrl = value || OPENAI_BASE_URL;
 							await onChange();
-						});
-				});
+						})
+				);
 		},
 	},
-	assemblyai: {
-		id: "assemblyai",
-		label: "AssemblyAI",
-		description: "Opt-in alternative. No practical size ceiling (5GB / 10hr) - recommended if you want to eliminate size-limit risk entirely.",
+	openrouter: {
+		id: "openrouter",
+		label: "OpenRouter",
+		description: "Routes Whisper transcription through OpenRouter - often cheaper. 25MB size ceiling, handled via silence-aware chunking.",
 		render: (containerEl, settings, onChange) => {
 			new Setting(containerEl)
 				.setName("API key")
-				.setDesc("Required only if AssemblyAI is selected as the transcription provider, or used via per-attempt override on right-click retry.")
+				.setDesc("Used for Whisper transcription. Also used for summary generation unless a separate summary API key is set below.")
 				.addText((text) =>
 					makeSecret(text)
-						.setPlaceholder("AssemblyAI API key")
+						.setPlaceholder("sk-or-...")
 						.setValue(settings.apiKey)
 						.onChange(async (value) => {
 							settings.apiKey = value;
@@ -339,14 +291,32 @@ const PROVIDER_SETTINGS_SCHEMA: {
 
 			new Setting(containerEl)
 				.setName("Model")
-				.setDesc("Universal-3.5 Pro: best accuracy, 6 languages. Universal-2: broader coverage (99+ languages), fallback.")
-				.addDropdown((dropdown) =>
-					dropdown
-						.addOption("universal-2", "Universal-2 (99+ languages)")
-						.addOption("universal-3.5-pro", "Universal-3.5 Pro (6 languages, best accuracy)")
+				.setDesc(
+					createFragment((el) => {
+						el.appendText("OpenRouter model id, provider-prefixed (e.g. openai/whisper-1, not just whisper-1). See the id on ");
+						el.createEl("a", { text: "OpenRouter's model page", href: OPENROUTER_MODELS_URL });
+						el.appendText(" (shown under the model name); that page links to other transcription models too.");
+					})
+				)
+				.addText((text) =>
+					text
+						.setPlaceholder(OPENROUTER_DEFAULT_MODEL)
 						.setValue(settings.model)
 						.onChange(async (value) => {
-							settings.model = value as AssemblyAiModelId;
+							settings.model = value || OPENROUTER_DEFAULT_MODEL;
+							await onChange();
+						})
+				);
+
+			new Setting(containerEl)
+				.setName("Base URL")
+				.setDesc("Edit directly to point at a proxy or self-hosted endpoint.")
+				.addText((text) =>
+					text
+						.setPlaceholder(OPENROUTER_BASE_URL)
+						.setValue(settings.baseUrl)
+						.onChange(async (value) => {
+							settings.baseUrl = value || OPENROUTER_BASE_URL;
 							await onChange();
 						})
 				);
@@ -362,7 +332,7 @@ interface SummaryProviderSchemaEntry {
 }
 
 /**
- * One entry per summary-generation provider. All four share the same
+ * One entry per summary-generation provider. Both share the same
  * (apiKey, model, baseUrl) shape, so this is metadata for a single shared
  * render function rather than a per-provider render callback.
  */
@@ -375,27 +345,15 @@ const SUMMARY_PROVIDER_SCHEMA: Record<SummaryProviderId, SummaryProviderSchemaEn
 	},
 	openrouter: {
 		label: "OpenRouter",
-		description: "Routes through OpenRouter - access to many models (including Anthropic/Google) via one key, often cheaper.",
+		description: "Routes through OpenRouter - access to many models (including Anthropic and Google) via one key, often cheaper.",
 		apiKeyPlaceholder: "sk-or-...",
 		modelPlaceholder: "openai/gpt-4o-mini",
 	},
-	anthropic: {
-		label: "Anthropic (not yet implemented)",
-		description: "Uses the Anthropic Messages API directly. Not implemented yet - selecting this will fail when you try to generate a summary.",
-		apiKeyPlaceholder: "sk-ant-...",
-		modelPlaceholder: "claude-haiku-4-5",
-	},
-	google: {
-		label: "Google (not yet implemented)",
-		description: "Uses the Gemini API (OpenAI-compatible endpoint). Not implemented yet - selecting this will fail when you try to generate a summary.",
-		apiKeyPlaceholder: "AIza...",
-		modelPlaceholder: "gemini-2.5-flash",
-	},
 };
 
-const SUMMARY_PROVIDER_ORDER: SummaryProviderId[] = ["openai", "openrouter", "anthropic", "google"];
+const SUMMARY_PROVIDER_ORDER: SummaryProviderId[] = ["openai", "openrouter"];
 
-const PROVIDER_ORDER: TranscriptionProviderId[] = ["whisper", "assemblyai"];
+const PROVIDER_ORDER: TranscriptionProviderId[] = ["openrouter", "openai"];
 
 export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 	plugin: AiTranscribeSummaryPlugin;
@@ -467,18 +425,17 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 		const schema = SUMMARY_PROVIDER_SCHEMA[providerId];
 		const settings = this.plugin.settings.summaryProviders[providerId];
 
-		// Whisper's key can only be reused for the one summary provider matching
-		// the host Whisper is actually configured against (see
-		// whisperKeyReuseTarget) - e.g. never offer it for "openai" while
-		// Whisper is set to an OpenRouter model, since that key would be sent to
-		// the wrong host and fail.
-		const reuseTarget = whisperKeyReuseTarget(this.plugin.settings);
+		// The transcription provider's key can only be reused for the one
+		// summary provider matching it (see transcriptionKeyReuseTarget) - e.g.
+		// never offer it for "openai" while the transcription provider is set to
+		// "openrouter", since that key would be sent to the wrong host and fail.
+		const reuseTarget = transcriptionKeyReuseTarget(this.plugin.settings);
 		if ((providerId === "openai" || providerId === "openrouter") && providerId === reuseTarget) {
 			const reuseHostLabel = reuseTarget === "openai" ? "OpenAI" : "OpenRouter";
 			let apiKeySetting: Setting | undefined;
 			new Setting(containerEl)
-				.setName(`Reuse Whisper (${reuseHostLabel}) API key`)
-				.setDesc(`Whisper is currently configured to call ${reuseHostLabel} - reuse that same key for summary generation instead of a separate key here.`)
+				.setName(`Reuse transcription (${reuseHostLabel}) API key`)
+				.setDesc(`Transcription is currently configured to call ${reuseHostLabel} - reuse that same key for summary generation instead of a separate key here.`)
 				.addToggle((toggle) =>
 					toggle.setValue(this.plugin.settings.reuseWhisperKeyForSummary).onChange(async (value) => {
 						this.plugin.settings.reuseWhisperKeyForSummary = value;
@@ -639,7 +596,7 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 			)
 			.addTextArea((text) => {
 				text
-					.setPlaceholder(" Obsidian, AssemblyAI, sprint retro")
+					.setPlaceholder(" Obsidian, Whisper, sprint retro")
 					.setValue(this.plugin.settings.vocabularyHints)
 					.onChange(async (value) => {
 						this.plugin.settings.vocabularyHints = value;

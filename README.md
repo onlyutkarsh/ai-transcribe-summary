@@ -28,8 +28,8 @@ This plugin is built around avoiding those failure modes specifically:
 
 - **In-app recording** - start, pause/resume, and stop meeting recordings from a ribbon icon, command palette, or hotkey.
 - **Right-click retry** - any `.webm`, `.mp3`, `.wav`, or `.m4a` file in your vault gets a "Transcribe & summarize" context menu item, so you can (re-)process audio you already have.
-- **Choice of transcription provider** - Whisper (via OpenAI or OpenRouter) by default, or AssemblyAI as an alternative with no practical file-size ceiling.
-- **Choice of summary provider** - OpenAI or OpenRouter today (Anthropic and Google are planned but not yet implemented).
+- **Choice of transcription provider** - Whisper via OpenAI or OpenRouter.
+- **Choice of summary provider** - OpenAI or OpenRouter (OpenRouter also gives access to Anthropic and Google models under one key).
 - **Optional transcript cleanup pass** - an LLM pass that removes filler words, false starts, and grammar mistakes before the transcript is saved or summarized, without changing its meaning.
 - **Custom vocabulary hints** - feed the transcription provider a list of names, jargon, or project terms to reduce misrecognition.
 - **Configurable output layout** - summary at your cursor or in a new note, transcript in the same note or a dedicated file, each in its own configurable vault folder.
@@ -38,7 +38,7 @@ This plugin is built around avoiding those failure modes specifically:
 ## Getting started
 
 1. Install the plugin (see below) and enable it in Obsidian's Community Plugins settings.
-2. Open **Settings → AI Transcribe & Summary** and add an API key for your chosen transcription provider (Whisper/OpenAI is the default) and summary provider.
+2. Open **Settings → AI Transcribe & Summary** and add an API key for your chosen transcription provider (Whisper/OpenRouter is the default) and summary provider.
 3. Click the microphone icon in the ribbon, or run **AI Transcribe & Summary: Start recording** from the command palette.
 4. When you're done, stop the recording. The audio is saved, transcribed, and summarized automatically - the summary lands at your cursor if you have a note open, or in a new note otherwise.
 
@@ -58,7 +58,7 @@ To process an audio file you already have in your vault, right-click it and choo
 
 | Section | What it controls |
 |---|---|
-| Transcription provider | Whisper (OpenAI/OpenRouter) or AssemblyAI, API key, model, base URL |
+| Transcription provider | OpenAI or OpenRouter (Whisper), API key, model, base URL |
 | Summary generation | Summary provider, model, temperature, and the prompt used to structure the summary |
 | Custom vocabulary | Names/jargon hints passed to the transcription provider |
 | Recording | Microphone selection, audio bitrate, silence auto-stop, max duration, stop confirmation |
@@ -69,14 +69,13 @@ Every prompt (summary and cleanup) is fully editable, with a one-click reset bac
 ## Requirements
 
 - Obsidian 1.5.0 or later.
-- An API key for at least one transcription provider (OpenAI, OpenRouter, or AssemblyAI) and, if you want summaries, one summary provider.
+- An API key for at least one transcription provider (OpenAI or OpenRouter) and, if you want summaries, one summary provider.
 - Works on desktop and mobile for recording and right-click retry; the live status bar timer is desktop only.
 
 ## Limitations
 
 - Speaker diarization ("who said what") isn't supported - this uses a single mic input.
 - This isn't a live/real-time transcription tool - it's record-then-process.
-- Anthropic and Google summary providers are listed in settings but not yet implemented; selecting one will fail when you try to generate a summary.
 - No speech-to-text system is 100% accurate. Custom vocabulary hints help with recurring names and jargon, but occasional misheard words on messy audio are expected.
 
 ## License

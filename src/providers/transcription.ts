@@ -1,5 +1,7 @@
 import type { TranscriptionProviderId } from "../settings";
 
+export type { TranscriptionProviderId };
+
 export interface TranscriptionRequest {
 	/** Recorded (or right-click-retried) audio file. */
 	audio: Blob;
@@ -17,10 +19,10 @@ export interface TranscriptionResult {
 }
 
 /**
- * One implementation per TranscriptionProviderId (whisper, assemblyai). A
- * provider is responsible for its own size-limit handling internally (e.g.
- * Whisper's silence-aware chunking + stitching); callers only see one
- * request in, one stitched result out.
+ * One implementation per TranscriptionProviderId (openai, openrouter - both
+ * Whisper-compatible). A provider is responsible for its own size-limit
+ * handling internally (e.g. Whisper's silence-aware chunking + stitching);
+ * callers only see one request in, one stitched result out.
  */
 export interface TranscriptionProvider {
 	readonly id: TranscriptionProviderId;

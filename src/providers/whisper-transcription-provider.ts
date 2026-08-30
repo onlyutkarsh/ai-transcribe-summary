@@ -3,17 +3,22 @@ import { chunkAtSilence, needsChunking } from "../audio/chunker";
 import { logDebug } from "../pipeline";
 import { encodeMultipartFormData } from "./multipart";
 import { hasRepetitionLoop } from "./repetition-detector";
-import { TranscriptionProvider, TranscriptionRequest, TranscriptionResult } from "./transcription";
+import { TranscriptionProvider, TranscriptionProviderId, TranscriptionRequest, TranscriptionResult } from "./transcription";
 
 export interface WhisperProviderConfig {
 	apiKey: string;
 	baseUrl: string;
-	/** API model name (e.g. "whisper-1", "whisper-large-v3") - distinct from the settings model id, which also encodes the host. */
+	/** API model name as sent to the API (e.g. "whisper-1", "whisper-large-v3"). */
 	apiModel: string;
 }
 
 const MAX_RETRIES = 3;
 const RETRY_BASE_DELAY_MS = 1000;
+
+const PROVIDER_LABELS: Record<TranscriptionProviderId, string> = {
+	openai: "OpenAI",
+	openrouter: "OpenRouter",
+};
 
 /** Whisper identifies the upload format from the filename extension, not the multipart Content-Type - must match the piece's actual encoding (webm/ogg from the recorder, wav from the chunker). */
 function extensionForMimeType(mimeType: string): string {
@@ -22,14 +27,13 @@ function extensionForMimeType(mimeType: string): string {
 	return "webm";
 }
 
+/** Whisper-compatible transcription over the OpenAI-shaped upload API - used for both the OpenAI and OpenRouter transcription providers, which differ only in apiKey/baseUrl/apiModel. */
 export class WhisperTranscriptionProvider implements TranscriptionProvider {
-	readonly id = "whisper" as const;
-
-	constructor(private config: WhisperProviderConfig) {}
+	constructor(readonly id: TranscriptionProviderId, private config: WhisperProviderConfig) {}
 
 	async transcribe(request: TranscriptionRequest): Promise<TranscriptionResult> {
 		if (!this.config.apiKey) {
-			throw new Error("Whisper API key is not set. Add it in Settings under Whisper (OpenAI / OpenRouter).");
+			throw new Error(`${PROVIDER_LABELS[this.id]} API key is not set. Add it in Settings under "${PROVIDER_LABELS[this.id]}".`);
 		}
 
 		const onProgress = request.onProgress ?? (() => {});

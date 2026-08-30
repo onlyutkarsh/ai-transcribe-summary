@@ -11,7 +11,7 @@ export interface SummaryResult {
 	summary: string;
 }
 
-/** One implementation per SummaryProviderId (openai, openrouter, anthropic, google). */
+/** One implementation per SummaryProviderId (openai, openrouter). */
 export interface SummaryProvider {
 	readonly id: SummaryProviderId;
 	summarize(request: SummaryRequest): Promise<SummaryResult>;

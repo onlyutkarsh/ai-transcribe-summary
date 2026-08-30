@@ -429,14 +429,12 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 			...DEFAULT_SETTINGS,
 			...saved,
 			providers: {
-				whisper: { ...DEFAULT_SETTINGS.providers.whisper, ...saved.providers?.whisper },
-				assemblyai: { ...DEFAULT_SETTINGS.providers.assemblyai, ...saved.providers?.assemblyai },
+				openai: { ...DEFAULT_SETTINGS.providers.openai, ...saved.providers?.openai },
+				openrouter: { ...DEFAULT_SETTINGS.providers.openrouter, ...saved.providers?.openrouter },
 			},
 			summaryProviders: {
 				openai: { ...DEFAULT_SETTINGS.summaryProviders.openai, ...saved.summaryProviders?.openai },
 				openrouter: { ...DEFAULT_SETTINGS.summaryProviders.openrouter, ...saved.summaryProviders?.openrouter },
-				anthropic: { ...DEFAULT_SETTINGS.summaryProviders.anthropic, ...saved.summaryProviders?.anthropic },
-				google: { ...DEFAULT_SETTINGS.summaryProviders.google, ...saved.summaryProviders?.google },
 			},
 		};
 	}
