@@ -1,4 +1,4 @@
-name: Release to Obsidian
+name: release
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ on:
         required: true
         type: string
 
-run-name: Release to Obsidian v${{ inputs.version }}
+run-name: v${{ inputs.version }}
 
 jobs:
   release:
