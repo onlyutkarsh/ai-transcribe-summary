@@ -18,6 +18,8 @@ export interface AudioSource {
 	mimeType: string;
 	/** Base filename (no extension) used for the output note when there's no active note to insert into. */
 	baseName: string;
+	/** The saved/source audio file in the vault, when one exists - used to insert a link to it alongside the transcript. Undefined when saveAudioFile is off (live recording) or never applicable. */
+	audioFile?: TFile;
 }
 
 /** Called with a short human-readable status as the pipeline moves through stages, so a caller can mirror it in the status bar. */
@@ -109,9 +111,11 @@ export async function runTranscribeAndSummarizePipeline(
 		transcriptText = cleanupResult.summary.trim() || transcriptText;
 	}
 
+	const audioLinkMarkdown = source.audioFile ? buildAudioLinkMarkdown(app, source.audioFile, activeView?.file?.path ?? "") : "";
+
 	if (!settings.generateSummary) {
 		onProgress("Saving transcript");
-		await writeTranscriptFile(app, settings, source.baseName, buildTranscriptMarkdown(transcriptText));
+		await writeTranscriptFile(app, settings, source.baseName, buildTranscriptMarkdown(transcriptText), source.audioFile);
 		new Notice(`Transcript ready for "${source.baseName}".`);
 		logDebug("pipeline finished (transcript only)");
 		return;
@@ -129,14 +133,17 @@ export async function runTranscribeAndSummarizePipeline(
 	});
 	logDebug("summary finished", { durationMs: Date.now() - summarizeStartedAt, summaryLength: summaryResult.summary.length });
 
-	const summaryMarkdown = buildSummaryMarkdown(summaryResult.summary, transcription.repetitionWarning);
+	// Audio link travels with the summary, not the transcript - it belongs in the main note
+	// (where the summary lands) even when transcript placement is "dedicated-file" and the
+	// transcript itself goes to a separate file the user may not open right away.
+	const summaryMarkdown = `${audioLinkMarkdown}${buildSummaryMarkdown(summaryResult.summary, transcription.repetitionWarning)}`;
 	const transcriptMarkdown = buildTranscriptMarkdown(transcriptText);
 
 	onProgress("Saving results");
 	if (activeView) {
-		await writeIntoActiveNote(activeView, settings, summaryMarkdown, transcriptMarkdown);
+		await writeIntoActiveNote(activeView, settings, summaryMarkdown, transcriptMarkdown, source.audioFile);
 	} else {
-		await writeIntoNewNote(app, settings, source.baseName, summaryMarkdown, transcriptMarkdown);
+		await writeIntoNewNote(app, settings, source.baseName, summaryMarkdown, transcriptMarkdown, source.audioFile);
 	}
 
 	new Notice(`Summary ready for "${source.baseName}".`);
@@ -154,18 +161,33 @@ function buildTranscriptMarkdown(transcript: string): string {
 	return `## Full Transcript\n\n${transcript.trim()}\n`;
 }
 
+/**
+ * Embedded link to the saved/source audio file, placed just above the
+ * transcript/summary - `!` forces an embed (renders as a playable audio
+ * widget) regardless of generateMarkdownLink's own wikilink-vs-markdown
+ * choice, which just follows the vault's "Use [[Wikilinks]]" setting.
+ * `sourcePath` is the path of the note the link will be written into (for a
+ * correctly relative link); "" when there's no active note, i.e. it's about
+ * to be written into a brand-new note at the vault root of summaryFolder.
+ */
+function buildAudioLinkMarkdown(app: App, audioFile: TFile, sourcePath: string): string {
+	const link = app.fileManager.generateMarkdownLink(audioFile, sourcePath);
+	return `**Audio:** !${link}\n\n`;
+}
+
 async function writeIntoActiveNote(
 	view: MarkdownView,
 	settings: AiTranscribeSummarySettings,
 	summaryMarkdown: string,
-	transcriptMarkdown: string
+	transcriptMarkdown: string,
+	audioFile: TFile | undefined
 ): Promise<void> {
 	const editor = view.editor;
 	const insertion = settings.transcriptPlacement === "same-note" ? `${summaryMarkdown}\n${transcriptMarkdown}` : summaryMarkdown;
 	editor.replaceSelection(insertion);
 
 	if (settings.transcriptPlacement === "dedicated-file") {
-		await writeTranscriptFile(view.app, settings, view.file?.basename ?? "meeting", transcriptMarkdown);
+		await writeTranscriptFile(view.app, settings, view.file?.basename ?? "meeting", transcriptMarkdown, audioFile);
 	}
 }
 
@@ -174,7 +196,8 @@ async function writeIntoNewNote(
 	settings: AiTranscribeSummarySettings,
 	baseName: string,
 	summaryMarkdown: string,
-	transcriptMarkdown: string
+	transcriptMarkdown: string,
+	audioFile: TFile | undefined
 ): Promise<void> {
 	const folderPath = normalizePath(settings.summaryFolder);
 	await ensureFolder(app, folderPath);
@@ -184,15 +207,28 @@ async function writeIntoNewNote(
 	await app.vault.create(notePath, content);
 
 	if (settings.transcriptPlacement === "dedicated-file") {
-		await writeTranscriptFile(app, settings, baseName, transcriptMarkdown);
+		await writeTranscriptFile(app, settings, baseName, transcriptMarkdown, audioFile);
 	}
 }
 
-async function writeTranscriptFile(app: App, settings: AiTranscribeSummarySettings, baseName: string, transcriptMarkdown: string): Promise<void> {
+/**
+ * Writes the dedicated transcript file. When an audio file is known, prefixes
+ * an embedded link to it (playable inline) - resolved against this file's own
+ * path so the transcript stays self-contained and playable even when opened
+ * on its own, without needing the summary note that links to it.
+ */
+async function writeTranscriptFile(
+	app: App,
+	settings: AiTranscribeSummarySettings,
+	baseName: string,
+	transcriptMarkdown: string,
+	audioFile: TFile | undefined
+): Promise<void> {
 	const folderPath = normalizePath(settings.transcriptFolder);
 	await ensureFolder(app, folderPath);
 	const transcriptPath = resolveNonCollidingPath(app, folderPath, baseName);
-	await app.vault.create(transcriptPath, transcriptMarkdown);
+	const audioLinkMarkdown = audioFile ? buildAudioLinkMarkdown(app, audioFile, transcriptPath) : "";
+	await app.vault.create(transcriptPath, `${audioLinkMarkdown}${transcriptMarkdown}`);
 }
 
 /** `<folderPath>/<baseName>.md`, or the same with a timestamp appended if that path is already taken - so re-running "Transcribe & summarize" on the same audio file creates a new note instead of throwing on Vault.create(). */

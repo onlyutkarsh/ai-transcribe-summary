@@ -155,7 +155,7 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 			await runTranscribeAndSummarizePipeline(
 				this.app,
 				this.settings,
-				{ blob, mimeType: blob.type, baseName: file.basename },
+				{ blob, mimeType: blob.type, baseName: file.basename, audioFile: file },
 				{ insertIntoActiveNote: false, onProgress: (status) => this.showPipelineProgress(jobId, status) }
 			);
 		} catch (error) {
@@ -338,7 +338,7 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 			await runTranscribeAndSummarizePipeline(
 				this.app,
 				this.settings,
-				{ blob: result.blob, mimeType: result.mimeType, baseName: savedFile?.basename ?? `meeting ${formatTimestampForFilename(new Date())}` },
+				{ blob: result.blob, mimeType: result.mimeType, baseName: savedFile?.basename ?? `meeting ${formatTimestampForFilename(new Date())}`, audioFile: savedFile },
 				{ insertIntoActiveNote: true, onProgress: (status) => this.showPipelineProgress(jobId, status) }
 			);
 		} catch (error) {
