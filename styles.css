@@ -1,0 +1,23 @@
+.ai-transcribe-summary-prompt-setting.setting-item {
+	display: block;
+}
+
+.ai-transcribe-summary-prompt-setting .setting-item-info {
+	margin-right: 0;
+}
+
+.ai-transcribe-summary-prompt-setting .setting-item-control {
+	width: 100%;
+	margin-top: var(--size-4-2);
+}
+
+.ai-transcribe-summary-prompt {
+	width: 100%;
+	resize: vertical;
+}
+
+.ai-transcribe-summary-prompt-reset.setting-item {
+	border-top: none;
+	padding-top: 0;
+	justify-content: flex-end;
+}

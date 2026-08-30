@@ -1,0 +1,48 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "watch: esbuild",
+			"type": "shell",
+			"command": "npm run dev",
+			"isBackground": true,
+			"problemMatcher": {
+				"owner": "typescript",
+				"fileLocation": ["relative", "${workspaceFolder}"],
+				"pattern": {
+					"regexp": "^(.*):(\\d+):(\\d+): (error|warning): (.*)$",
+					"file": 1,
+					"line": 2,
+					"column": 3,
+					"severity": 4,
+					"message": 5
+				},
+				"background": {
+					"activeOnStart": true,
+					"beginsPattern": "^\\[watch\\] build started",
+					"endsPattern": "^\\[watch\\] build finished"
+				}
+			},
+			"presentation": {
+				"reveal": "silent",
+				"panel": "dedicated"
+			}
+		},
+		{
+			"label": "relaunch: Obsidian (debug port 9222)",
+			"type": "shell",
+			"command": "killall Obsidian 2>/dev/null; sleep 1; open -a Obsidian --args --remote-debugging-port=9222 --remote-allow-origins=*",
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "silent",
+				"panel": "dedicated"
+			}
+		},
+		{
+			"label": "dev: build + relaunch Obsidian",
+			"dependsOn": ["watch: esbuild", "relaunch: Obsidian (debug port 9222)"],
+			"dependsOrder": "sequence",
+			"problemMatcher": []
+		}
+	]
+}

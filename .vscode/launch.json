@@ -1,0 +1,29 @@
+{
+	"version": "0.2.0",
+	"configurations": [
+		{
+			"type": "chrome",
+			"request": "attach",
+			"name": "Attach to Obsidian",
+			"port": 9222,
+			"webRoot": "${workspaceFolder}",
+			"timeout": 30000,
+			"sourceMaps": true,
+			"preLaunchTask": "dev: build + relaunch Obsidian",
+			"presentation": {
+				"hidden": false,
+				"group": "obsidian",
+				"order": 1
+			}
+		},
+		{
+			"type": "chrome",
+			"request": "attach",
+			"name": "Attach to Obsidian (already running w/ debug port)",
+			"port": 9222,
+			"webRoot": "${workspaceFolder}",
+			"timeout": 10000,
+			"sourceMaps": true
+		}
+	]
+}
