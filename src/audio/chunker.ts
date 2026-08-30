@@ -19,7 +19,14 @@ export function needsChunking(blob: Blob): boolean {
 	return blob.size > WHISPER_CHUNK_THRESHOLD_BYTES;
 }
 
-export async function chunkAtSilence(blob: Blob, targetChunkBytes = WHISPER_CHUNK_THRESHOLD_BYTES): Promise<AudioChunk[]> {
+/**
+ * Yields one WAV chunk at a time instead of building the whole array up front - the caller
+ * (Whisper upload loop) consumes and discards each chunk before the next is encoded, so at
+ * most one encoded WAV ArrayBuffer is resident alongside the decoded PCM buffer, rather than
+ * all chunks simultaneously. The decoded PCM buffer itself must stay alive for the whole
+ * generator's lifetime since chunks are sliced from it directly.
+ */
+export async function* chunkAtSilence(blob: Blob, targetChunkBytes = WHISPER_CHUNK_THRESHOLD_BYTES): AsyncGenerator<AudioChunk> {
 	const audioContext = new AudioContext();
 	let buffer: AudioBuffer;
 	try {
@@ -29,15 +36,12 @@ export async function chunkAtSilence(blob: Blob, targetChunkBytes = WHISPER_CHUN
 	}
 
 	const splitPoints = findSilenceSplitPoints(buffer, targetChunkBytes);
-	const chunks: AudioChunk[] = [];
 	let startSample = 0;
 
 	for (const splitSample of [...splitPoints, buffer.length]) {
-		chunks.push({ data: encodeWav(buffer, startSample, splitSample), mimeType: "audio/wav" });
+		yield { data: encodeWav(buffer, startSample, splitSample), mimeType: "audio/wav" };
 		startSample = splitSample;
 	}
-
-	return chunks;
 }
 
 /** Picks silence-gap sample indices roughly every `targetChunkBytes` (measured in equivalent WAV size) worth of audio. */

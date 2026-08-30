@@ -14,6 +14,7 @@ const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", 
 
 const EXTENSION_MIME_TYPES: Record<string, string> = {
 	webm: "audio/webm",
+	ogg: "audio/ogg",
 	mp3: "audio/mpeg",
 	wav: "audio/wav",
 	m4a: "audio/mp4",
@@ -35,7 +36,9 @@ function formatElapsed(ms: number): string {
 type RecordingState = "idle" | "recording" | "paused";
 
 class StopRecordingConfirmModal extends Modal {
-	constructor(app: App, private onConfirm: () => void) {
+	private confirmed = false;
+
+	constructor(app: App, private onConfirm: () => void, private onCancel: () => void) {
 		super(app);
 	}
 
@@ -50,6 +53,7 @@ class StopRecordingConfirmModal extends Modal {
 					.setButtonText("Stop recording")
 					.setWarning()
 					.onClick(() => {
+						this.confirmed = true;
 						this.close();
 						this.onConfirm();
 					})
@@ -58,6 +62,7 @@ class StopRecordingConfirmModal extends Modal {
 
 	onClose() {
 		this.contentEl.empty();
+		if (!this.confirmed) this.onCancel();
 	}
 }
 
@@ -66,13 +71,19 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 
 	private statusBarItem!: HTMLElement;
 	private state: RecordingState = "idle";
+	/** True while start/stop is in flight (awaiting mic permission or recorder.stop()'s final chunk) - blocks re-entrant start/stop so a quick second action can't race the recorder's stream/chunks out from under the in-flight one. */
+	private transitioning = false;
+	/** Set once onunload() runs, so a startRecording() whose getUserMedia() was still pending at unload time can detect teardown and discard the now-unmanaged stream instead of continuing as if the plugin were still active. */
+	private unloaded = false;
 	private segmentStartedAt = 0;
 	private accumulatedMs = 0;
 	private timerIntervalId: number | undefined;
 	private ribbonIconEl!: HTMLElement;
 	private recorder = new AudioRecorder();
 
-	private pipelineStatus = "";
+	/** One entry per in-flight pipeline job (a right-click "Transcribe & summarize", or the post-recording pipeline), keyed by a locally-unique id - so one job finishing doesn't stop/hide the shared status bar spinner while others are still running. */
+	private activePipelineJobs = new Map<number, string>();
+	private nextPipelineJobId = 0;
 	private pipelineAnimationIntervalId: number | undefined;
 	private pipelineAnimationFrame = 0;
 
@@ -83,6 +94,7 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 		this.statusBarItem.hide();
 
 		this.ribbonIconEl = this.addRibbonIcon("mic", "Start meeting recording", () => {
+			if (this.transitioning) return;
 			if (this.state === "idle") {
 				void this.startRecording();
 			} else {
@@ -94,7 +106,7 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 			id: "start-recording",
 			name: "Start recording",
 			checkCallback: (checking) => {
-				if (this.state !== "idle") return false;
+				if (this.state !== "idle" || this.transitioning) return false;
 				if (!checking) void this.startRecording();
 				return true;
 			},
@@ -104,7 +116,7 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 			id: "stop-recording",
 			name: "Stop recording",
 			checkCallback: (checking) => {
-				if (this.state === "idle") return false;
+				if (this.state === "idle" || this.transitioning) return false;
 				if (!checking) this.requestStopRecording();
 				return true;
 			},
@@ -114,7 +126,7 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 			id: "toggle-pause-recording",
 			name: "Pause/resume recording",
 			checkCallback: (checking) => {
-				if (this.state === "idle") return false;
+				if (this.state === "idle" || this.transitioning) return false;
 				if (!checking) this.togglePause();
 				return true;
 			},
@@ -137,24 +149,30 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 	}
 
 	private async transcribeAndSummarizeFile(file: TFile): Promise<void> {
+		const jobId = this.beginPipelineJob();
 		try {
 			const blob = new Blob([await this.app.vault.readBinary(file)], { type: mimeTypeForExtension(file.extension) });
 			await runTranscribeAndSummarizePipeline(
 				this.app,
 				this.settings,
 				{ blob, mimeType: blob.type, baseName: file.basename },
-				{ insertIntoActiveNote: false, onProgress: (status) => this.showPipelineProgress(status) }
+				{ insertIntoActiveNote: false, onProgress: (status) => this.showPipelineProgress(jobId, status) }
 			);
 		} catch (error) {
 			console.error("ai-transcribe-summary: transcribe & summarize failed", error);
 			new Notice(`Transcribe & summarize failed: ${error instanceof Error ? error.message : String(error)}`);
 		} finally {
-			this.hidePipelineProgress();
+			this.endPipelineJob(jobId);
 		}
 	}
 
-	private showPipelineProgress(status: string) {
-		this.pipelineStatus = status;
+	/** Registers a new pipeline job and returns its id, to be passed to showPipelineProgress/endPipelineJob for the lifetime of that job. */
+	private beginPipelineJob(): number {
+		return this.nextPipelineJobId++;
+	}
+
+	private showPipelineProgress(jobId: number, status: string) {
+		this.activePipelineJobs.set(jobId, status);
 		this.statusBarItem.show();
 		this.renderPipelineProgress();
 
@@ -167,20 +185,40 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 	private renderPipelineProgress() {
 		const frame = SPINNER_FRAMES[this.pipelineAnimationFrame];
 		this.pipelineAnimationFrame = (this.pipelineAnimationFrame + 1) % SPINNER_FRAMES.length;
-		this.statusBarItem.setText(`${frame} ${this.pipelineStatus}`);
+
+		// Map iteration order is insertion order, so this is the most recently *started* job,
+		// not necessarily the most recently updated one - a reasonable stand-in given the
+		// status bar can only show one line, and job status changes are infrequent.
+		const statuses = [...this.activePipelineJobs.values()];
+		const mostRecent = statuses[statuses.length - 1];
+		const otherCount = statuses.length - 1;
+		const suffix = otherCount > 0 ? ` (+${otherCount} more)` : "";
+		this.statusBarItem.setText(`${frame} ${mostRecent}${suffix}`);
 	}
 
-	private hidePipelineProgress() {
+	/** Ends one pipeline job. Only stops the shared spinner/hides the status bar once no other job is still active. */
+	private endPipelineJob(jobId: number) {
+		this.activePipelineJobs.delete(jobId);
+		if (this.activePipelineJobs.size > 0) {
+			this.renderPipelineProgress();
+			return;
+		}
+
 		if (this.pipelineAnimationIntervalId !== undefined) {
 			window.clearInterval(this.pipelineAnimationIntervalId);
 			this.pipelineAnimationIntervalId = undefined;
 		}
 		if (this.state === "idle") {
 			this.statusBarItem.hide();
+		} else {
+			// A recording is still in progress - restore its display immediately instead of
+			// leaving the last spinner frame on screen until the next 1s timer tick.
+			this.updateStatusBar();
 		}
 	}
 
 	onunload() {
+		this.unloaded = true;
 		this.stopTimer();
 		if (this.state !== "idle") {
 			this.recorder.discard();
@@ -189,7 +227,17 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 
 	private requestStopRecording() {
 		if (this.settings.confirmBeforeStoppingRecording) {
-			new StopRecordingConfirmModal(this.app, () => void this.stopRecording()).open();
+			// Reserve the transition immediately so a second stop action can't open another
+			// confirm modal while this one is still open - only one stopRecording() may run
+			// against the recorder at a time. Released if the user cancels.
+			this.transitioning = true;
+			new StopRecordingConfirmModal(
+				this.app,
+				() => void this.stopRecording(),
+				() => {
+					this.transitioning = false;
+				}
+			).open();
 		} else {
 			void this.stopRecording();
 		}
@@ -204,14 +252,27 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 	}
 
 	private async startRecording() {
+		this.transitioning = true;
 		try {
 			await this.recorder.start({
 				microphoneDeviceId: this.settings.microphoneDeviceId,
 				bitrateKbps: this.settings.audioBitrateKbps,
+				silenceAutoStopMinutes: this.settings.silenceAutoStopMinutes,
+				onSilenceTimeout: () => this.autoStopRecording(`${this.settings.silenceAutoStopMinutes} minutes of silence`),
 			});
 		} catch (error) {
 			console.error("ai-transcribe-summary: failed to start recording", error);
 			new Notice("Could not start recording - check microphone permissions.");
+			return;
+		} finally {
+			this.transitioning = false;
+		}
+
+		if (this.unloaded) {
+			// Plugin was disabled/reloaded while getUserMedia() was still pending - the mic
+			// stream this just acquired is unmanaged by anything still running, so tear it
+			// down immediately instead of continuing to "record" past teardown.
+			this.recorder.discard();
 			return;
 		}
 
@@ -244,11 +305,8 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 	}
 
 	private async stopRecording() {
-		this.state = "idle";
+		this.transitioning = true;
 		this.stopTimer();
-
-		this.ribbonIconEl.removeClass("is-active");
-		this.ribbonIconEl.setAttribute("aria-label", "Start meeting recording");
 
 		let result: RecordingResult;
 		try {
@@ -256,9 +314,18 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 		} catch (error) {
 			console.error("ai-transcribe-summary: failed to stop recording", error);
 			new Notice("Recording stop failed - no audio was saved.");
+			this.state = "idle";
+			this.transitioning = false;
+			this.ribbonIconEl.removeClass("is-active");
+			this.ribbonIconEl.setAttribute("aria-label", "Start meeting recording");
 			this.statusBarItem.hide();
 			return;
 		}
+
+		this.state = "idle";
+		this.transitioning = false;
+		this.ribbonIconEl.removeClass("is-active");
+		this.ribbonIconEl.setAttribute("aria-label", "Start meeting recording");
 
 		// Raw audio is always preserved regardless of what transcription/summary do downstream.
 		let savedFile: TFile | undefined;
@@ -266,28 +333,36 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 			savedFile = await this.saveRecording(result);
 		}
 
+		const jobId = this.beginPipelineJob();
 		try {
 			await runTranscribeAndSummarizePipeline(
 				this.app,
 				this.settings,
 				{ blob: result.blob, mimeType: result.mimeType, baseName: savedFile?.basename ?? `meeting ${formatTimestampForFilename(new Date())}` },
-				{ insertIntoActiveNote: true, onProgress: (status) => this.showPipelineProgress(status) }
+				{ insertIntoActiveNote: true, onProgress: (status) => this.showPipelineProgress(jobId, status) }
 			);
 		} catch (error) {
 			console.error("ai-transcribe-summary: transcribe & summarize failed", error);
 			new Notice(`Transcribe & summarize failed: ${error instanceof Error ? error.message : String(error)}`);
 		} finally {
-			this.hidePipelineProgress();
+			this.endPipelineJob(jobId);
 		}
 	}
 
 	private async saveRecording(result: RecordingResult): Promise<TFile | undefined> {
 		const folderPath = normalizePath(this.settings.audioFolder);
-		const existingFolder = this.app.vault.getAbstractFileByPath(folderPath);
-		if (!existingFolder) {
-			await this.app.vault.createFolder(folderPath);
-		} else if (!(existingFolder instanceof TFolder)) {
-			new Notice(`Audio folder "${folderPath}" is not a folder - recording not saved.`);
+
+		try {
+			const existingFolder = this.app.vault.getAbstractFileByPath(folderPath);
+			if (!existingFolder) {
+				await this.app.vault.createFolder(folderPath);
+			} else if (!(existingFolder instanceof TFolder)) {
+				new Notice(`Audio folder "${folderPath}" is not a folder - recording not saved.`);
+				return undefined;
+			}
+		} catch (error) {
+			console.error("ai-transcribe-summary: failed to create audio folder", error);
+			new Notice("Failed to create audio folder - recording not saved. See console for details.");
 			return undefined;
 		}
 
@@ -320,9 +395,27 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 
 	private updateStatusBar() {
 		const elapsed = this.accumulatedMs + (this.state === "recording" ? Date.now() - this.segmentStartedAt : 0);
-		const icon = this.state === "paused" ? "⏸" : "🔴";
-		const label = this.state === "paused" ? "Paused" : "Recording";
-		this.statusBarItem.setText(`${icon} ${label} ${formatElapsed(elapsed)}`);
+
+		// While a pipeline job is showing its spinner, let it own the status bar text - otherwise
+		// this 1s timer tick and the 100ms spinner tick fight over the same line. The max-duration
+		// check below still runs regardless, so a long recording auto-stops even mid-pipeline-job.
+		if (this.activePipelineJobs.size === 0) {
+			const icon = this.state === "paused" ? "⏸" : "🔴";
+			const label = this.state === "paused" ? "Paused" : "Recording";
+			this.statusBarItem.setText(`${icon} ${label} ${formatElapsed(elapsed)}`);
+		}
+
+		const maxMs = this.settings.maxRecordingHours * 60 * 60 * 1000;
+		if (this.state === "recording" && maxMs > 0 && elapsed >= maxMs) {
+			this.autoStopRecording(`the ${this.settings.maxRecordingHours}-hour maximum recording duration`);
+		}
+	}
+
+	/** Stops the recording without the usual confirm-before-stopping prompt, since the user isn't the one initiating it. */
+	private autoStopRecording(reason: string) {
+		if (this.state === "idle" || this.transitioning) return;
+		new Notice(`Recording auto-stopped: reached ${reason}.`);
+		void this.stopRecording();
 	}
 
 	async loadSettings() {

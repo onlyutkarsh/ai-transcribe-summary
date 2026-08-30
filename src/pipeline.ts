@@ -76,6 +76,11 @@ export async function runTranscribeAndSummarizePipeline(
 		throw new Error(configError);
 	}
 
+	// Captured up front, not after the transcription/summary calls - the user may switch notes
+	// while those are in flight, and the result should land in the note that was active when
+	// recording stopped, not whatever happens to be active when the LLM calls finish.
+	const activeView = options.insertIntoActiveNote ? app.workspace.getActiveViewOfType(MarkdownView) : null;
+
 	const transcriptionProvider = createTranscriptionProvider(settings);
 	logDebug("transcription provider resolved", transcriptionProvider.id);
 
@@ -132,8 +137,6 @@ export async function runTranscribeAndSummarizePipeline(
 
 	const summaryMarkdown = buildSummaryMarkdown(summaryResult.summary, transcription.repetitionWarning);
 	const transcriptMarkdown = buildTranscriptMarkdown(transcriptText);
-
-	const activeView = options.insertIntoActiveNote ? app.workspace.getActiveViewOfType(MarkdownView) : null;
 
 	onProgress("Saving results");
 	if (activeView) {
@@ -217,5 +220,5 @@ async function ensureFolder(app: App, folderPath: string): Promise<void> {
 }
 
 export function isAudioFile(file: TFile): boolean {
-	return ["webm", "mp3", "wav", "m4a"].includes(file.extension.toLowerCase());
+	return ["webm", "ogg", "mp3", "wav", "m4a"].includes(file.extension.toLowerCase());
 }
