@@ -7,6 +7,7 @@ export interface OpenAiSummaryProviderConfig {
 	apiKey: string;
 	baseUrl: string;
 	model: string;
+	temperature: number;
 }
 
 /** Backs both "openai" and "openrouter" - OpenRouter exposes the same Chat Completions request/response shape. */
@@ -29,6 +30,7 @@ export class OpenAiSummaryProvider implements SummaryProvider {
 			throw: false,
 			body: JSON.stringify({
 				model: this.config.model,
+				temperature: this.config.temperature,
 				messages: [
 					{ role: "system", content: request.prompt },
 					{ role: "user", content: request.transcript },

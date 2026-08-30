@@ -8,6 +8,11 @@ export function logDebug(...args: unknown[]): void {
 	console.debug(LOG_PREFIX, ...args);
 }
 
+export function formatTimestampForFilename(date: Date): string {
+	const pad = (n: number) => n.toString().padStart(2, "0");
+	return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}-${pad(date.getMinutes())}-${pad(date.getSeconds())}`;
+}
+
 export interface AudioSource {
 	blob: Blob;
 	mimeType: string;
@@ -27,10 +32,10 @@ export function validatePipelineConfig(settings: AiTranscribeSummarySettings): s
 		return 'AssemblyAI API key is not set. Add it in Settings under "AssemblyAI", or switch the transcription provider.';
 	}
 
-	if (settings.generateSummary) {
+	if (settings.generateSummary || settings.cleanupTranscript) {
 		if (settings.summaryProvider === "anthropic" || settings.summaryProvider === "google") {
 			const label = settings.summaryProvider === "anthropic" ? "Anthropic" : "Google";
-			return `${label} summary generation is not implemented yet. Select OpenAI or OpenRouter in Settings under "Summary generation", or turn off "Generate summary after transcription".`;
+			return `${label} summary generation is not implemented yet. Select OpenAI or OpenRouter in Settings under "Summary generation", or turn off "Generate summary after transcription"${settings.cleanupTranscript ? ' and "Clean up transcript"' : ""}.`;
 		}
 
 		const effectiveApiKey = resolveSummaryApiKey(settings, settings.summaryProvider);
@@ -39,7 +44,8 @@ export function validatePipelineConfig(settings: AiTranscribeSummarySettings): s
 			const hint = isReusingWhisperKey
 				? '"Reuse Whisper API key" is on but the Whisper API key is also empty - set one of the two'
 				: `Add it in Settings under "Summary generation"`;
-			return `Summary generation is on but the ${settings.summaryProvider} API key is not set. ${hint}, or turn off "Generate summary after transcription".`;
+			const feature = settings.generateSummary ? "Summary generation" : "Transcript cleanup";
+			return `${feature} is on but the ${settings.summaryProvider} API key is not set. ${hint}, or turn off "Generate summary after transcription"${settings.cleanupTranscript ? ' / "Clean up transcript"' : ""}.`;
 		}
 	}
 
@@ -73,7 +79,7 @@ export async function runTranscribeAndSummarizePipeline(
 	const transcriptionProvider = createTranscriptionProvider(settings);
 	logDebug("transcription provider resolved", transcriptionProvider.id);
 
-	onProgress(`Transcribing "${source.baseName}"...`);
+	onProgress("Transcribing");
 	new Notice(`Transcribing "${source.baseName}"...`);
 	const transcribeStartedAt = Date.now();
 	const transcription = await transcriptionProvider.transcribe({
@@ -88,9 +94,25 @@ export async function runTranscribeAndSummarizePipeline(
 		new Notice(`Warning: possible repetition-loop artifact detected in the transcript for "${source.baseName}".`);
 	}
 
+	let transcriptText = transcription.text;
+	if (settings.cleanupTranscript) {
+		const cleanupProvider = createSummaryProvider(settings);
+		logDebug("cleanup provider resolved", cleanupProvider.id);
+
+		onProgress("Cleaning up transcript");
+		new Notice(`Cleaning up transcript for "${source.baseName}"...`);
+		const cleanupStartedAt = Date.now();
+		const cleanupResult = await cleanupProvider.summarize({
+			transcript: transcriptText,
+			prompt: settings.cleanupPrompt,
+		});
+		logDebug("cleanup finished", { durationMs: Date.now() - cleanupStartedAt, textLength: cleanupResult.summary.length });
+		transcriptText = cleanupResult.summary.trim() || transcriptText;
+	}
+
 	if (!settings.generateSummary) {
-		onProgress(`Saving transcript for "${source.baseName}"...`);
-		await writeTranscriptFile(app, settings, source.baseName, buildTranscriptMarkdown(transcription.text));
+		onProgress("Saving transcript");
+		await writeTranscriptFile(app, settings, source.baseName, buildTranscriptMarkdown(transcriptText));
 		new Notice(`Transcript ready for "${source.baseName}".`);
 		logDebug("pipeline finished (transcript only)");
 		return;
@@ -99,21 +121,21 @@ export async function runTranscribeAndSummarizePipeline(
 	const summaryProvider = createSummaryProvider(settings);
 	logDebug("summary provider resolved", summaryProvider.id);
 
-	onProgress(`Generating summary for "${source.baseName}"...`);
+	onProgress("Generating summary");
 	new Notice(`Generating summary for "${source.baseName}"...`);
 	const summarizeStartedAt = Date.now();
 	const summaryResult = await summaryProvider.summarize({
-		transcript: transcription.text,
+		transcript: transcriptText,
 		prompt: settings.summaryPrompt,
 	});
 	logDebug("summary finished", { durationMs: Date.now() - summarizeStartedAt, summaryLength: summaryResult.summary.length });
 
 	const summaryMarkdown = buildSummaryMarkdown(summaryResult.summary, transcription.repetitionWarning);
-	const transcriptMarkdown = buildTranscriptMarkdown(transcription.text);
+	const transcriptMarkdown = buildTranscriptMarkdown(transcriptText);
 
 	const activeView = options.insertIntoActiveNote ? app.workspace.getActiveViewOfType(MarkdownView) : null;
 
-	onProgress(`Saving results for "${source.baseName}"...`);
+	onProgress("Saving results");
 	if (activeView) {
 		await writeIntoActiveNote(activeView, settings, summaryMarkdown, transcriptMarkdown);
 	} else {
@@ -161,7 +183,7 @@ async function writeIntoNewNote(
 	await ensureFolder(app, folderPath);
 
 	const content = settings.transcriptPlacement === "same-note" ? `${summaryMarkdown}\n${transcriptMarkdown}` : summaryMarkdown;
-	const notePath = normalizePath(`${folderPath}/${baseName}.md`);
+	const notePath = resolveNonCollidingPath(app, folderPath, baseName);
 	await app.vault.create(notePath, content);
 
 	if (settings.transcriptPlacement === "dedicated-file") {
@@ -172,8 +194,17 @@ async function writeIntoNewNote(
 async function writeTranscriptFile(app: App, settings: AiTranscribeSummarySettings, baseName: string, transcriptMarkdown: string): Promise<void> {
 	const folderPath = normalizePath(settings.transcriptFolder);
 	await ensureFolder(app, folderPath);
-	const transcriptPath = normalizePath(`${folderPath}/${baseName}.md`);
+	const transcriptPath = resolveNonCollidingPath(app, folderPath, baseName);
 	await app.vault.create(transcriptPath, transcriptMarkdown);
+}
+
+/** `<folderPath>/<baseName>.md`, or the same with a timestamp appended if that path is already taken - so re-running "Transcribe & summarize" on the same audio file creates a new note instead of throwing on Vault.create(). */
+function resolveNonCollidingPath(app: App, folderPath: string, baseName: string): string {
+	const notePath = normalizePath(`${folderPath}/${baseName}.md`);
+	if (!app.vault.getAbstractFileByPath(notePath)) {
+		return notePath;
+	}
+	return normalizePath(`${folderPath}/${baseName} ${formatTimestampForFilename(new Date())}.md`);
 }
 
 async function ensureFolder(app: App, folderPath: string): Promise<void> {

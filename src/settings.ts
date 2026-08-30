@@ -33,6 +33,16 @@ Unresolved questions or items that need future discussion.
 
 Never invent names, owners, dates, or facts that are not explicitly present in the transcript. If a section has no content, omit it rather than leaving it blank.`;
 
+export const DEFAULT_CLEANUP_PROMPT = `You are cleaning up a raw speech-to-text meeting transcript. Rewrite it to be more readable while preserving meaning exactly:
+
+- Remove filler words and verbal tics (um, uh, like, you know, so, I mean) when they carry no meaning.
+- Fix grammar, punctuation, and sentence breaks.
+- Remove false starts and repeated words/phrases from self-correction.
+- Keep the same speaker's intent, wording, tone, and every fact, name, number, and decision exactly as said - never summarize, shorten, paraphrase away detail, or invent content.
+- Preserve speaker labels/turns if present in the input.
+
+Output only the cleaned transcript text, nothing else.`;
+
 export type TranscriptionProviderId = "whisper" | "assemblyai";
 
 /** Each entry is one model as served by one host - the two are picked together, not independently. */
@@ -129,11 +139,14 @@ export type SummaryProviderId = "openai" | "openrouter" | "anthropic" | "google"
  * entry, not a scattering of top-level fields.
  */
 export interface SummaryProviderSettingsMap {
-	openai: { apiKey: string; model: string; baseUrl: string };
-	openrouter: { apiKey: string; model: string; baseUrl: string };
-	anthropic: { apiKey: string; model: string; baseUrl: string };
-	google: { apiKey: string; model: string; baseUrl: string };
+	openai: { apiKey: string; model: string; baseUrl: string; temperature: number };
+	openrouter: { apiKey: string; model: string; baseUrl: string; temperature: number };
+	anthropic: { apiKey: string; model: string; baseUrl: string; temperature: number };
+	google: { apiKey: string; model: string; baseUrl: string; temperature: number };
 }
+
+/** Lower than the API default (usually 1.0) - summarization should stay close to the transcript, not get creative. */
+export const DEFAULT_SUMMARY_TEMPERATURE = 0.3;
 
 export interface AiTranscribeSummarySettings {
 	// Active transcription provider + its per-provider config
@@ -155,6 +168,15 @@ export interface AiTranscribeSummarySettings {
 	 * "openrouter", never "openai".
 	 */
 	reuseWhisperKeyForSummary: boolean;
+
+	/**
+	 * Optional LLM cleanup pass over the raw Whisper/AssemblyAI transcript
+	 * (filler words, false starts, grammar) before it's saved or fed into
+	 * summary generation. Uses the same provider/model/key already configured
+	 * for summaryProvider - no separate provider selection.
+	 */
+	cleanupTranscript: boolean;
+	cleanupPrompt: string;
 
 	// Custom vocabulary hints
 	vocabularyHints: string;
@@ -196,14 +218,17 @@ export const DEFAULT_SETTINGS: AiTranscribeSummarySettings = {
 
 	summaryProvider: "openai",
 	summaryProviders: {
-		openai: { apiKey: "", model: "gpt-4o-mini", baseUrl: OPENAI_BASE_URL },
-		openrouter: { apiKey: "", model: "openai/gpt-4o-mini", baseUrl: OPENROUTER_BASE_URL },
-		anthropic: { apiKey: "", model: "claude-haiku-4-5", baseUrl: ANTHROPIC_BASE_URL },
-		google: { apiKey: "", model: "gemini-2.5-flash", baseUrl: GOOGLE_BASE_URL },
+		openai: { apiKey: "", model: "gpt-4o-mini", baseUrl: OPENAI_BASE_URL, temperature: DEFAULT_SUMMARY_TEMPERATURE },
+		openrouter: { apiKey: "", model: "openai/gpt-4o-mini", baseUrl: OPENROUTER_BASE_URL, temperature: DEFAULT_SUMMARY_TEMPERATURE },
+		anthropic: { apiKey: "", model: "claude-haiku-4-5", baseUrl: ANTHROPIC_BASE_URL, temperature: DEFAULT_SUMMARY_TEMPERATURE },
+		google: { apiKey: "", model: "gemini-2.5-flash", baseUrl: GOOGLE_BASE_URL, temperature: DEFAULT_SUMMARY_TEMPERATURE },
 	},
 	summaryPrompt: DEFAULT_SUMMARY_PROMPT,
 	generateSummary: true,
 	reuseWhisperKeyForSummary: false,
+
+	cleanupTranscript: false,
+	cleanupPrompt: DEFAULT_CLEANUP_PROMPT,
 
 	vocabularyHints: "",
 
@@ -504,6 +529,24 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
+			.setName("Temperature")
+			.setDesc(
+				`Randomness of the generated summary, from 0 (deterministic, sticks close to the transcript) to 2 (more creative, more prone to inventing details). Default ${DEFAULT_SUMMARY_TEMPERATURE} favors accuracy.`
+			)
+			.addText((text) =>
+				text
+					.setPlaceholder(String(DEFAULT_SUMMARY_TEMPERATURE))
+					.setValue(String(settings.temperature))
+					.onChange(async (value) => {
+						const parsed = Number(value);
+						if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 2) {
+							settings.temperature = parsed;
+							await this.plugin.saveSettings();
+						}
+					})
+			);
+
+		new Setting(containerEl)
 			.setName("Base URL")
 			.setDesc("Edit directly to point at a proxy or self-hosted endpoint.")
 			.addText((text) =>
@@ -568,7 +611,7 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 						this.plugin.settings.summaryPrompt = value || DEFAULT_SUMMARY_PROMPT;
 						await this.plugin.saveSettings();
 					});
-				text.inputEl.rows = 12;
+				text.inputEl.rows = 6;
 				text.inputEl.addClass("ai-transcribe-summary-prompt");
 			});
 
@@ -596,7 +639,7 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 			)
 			.addTextArea((text) => {
 				text
-					.setPlaceholder("Utkarsh, Obsidian, AssemblyAI, sprint retro")
+					.setPlaceholder(" Obsidian, AssemblyAI, sprint retro")
 					.setValue(this.plugin.settings.vocabularyHints)
 					.onChange(async (value) => {
 						this.plugin.settings.vocabularyHints = value;
@@ -832,6 +875,54 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 					})
 			);
 		updateFolderVisibility();
+
+		let cleanupDetailsEl: HTMLElement | undefined;
+		new Setting(containerEl)
+			.setName("Clean up transcript")
+			.setDesc(
+				"Run the transcript through the summary provider/model configured above to remove filler words, false starts, and grammar mistakes before it's saved or summarized. Adds one extra LLM call per recording."
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.cleanupTranscript).onChange(async (value) => {
+					this.plugin.settings.cleanupTranscript = value;
+					await this.plugin.saveSettings();
+					cleanupDetailsEl?.toggle(value);
+				})
+			);
+
+		cleanupDetailsEl = containerEl.createDiv();
+		cleanupDetailsEl.toggle(this.plugin.settings.cleanupTranscript);
+
+		let cleanupPromptTextArea: TextAreaComponent | undefined;
+		new Setting(cleanupDetailsEl)
+			.setClass("ai-transcribe-summary-prompt-setting")
+			.setName("Cleanup prompt")
+			.setDesc("Instructions sent to the LLM to clean up the raw transcript. Customize the wording, but keep it from summarizing, shortening, or inventing content.")
+			.addTextArea((text) => {
+				cleanupPromptTextArea = text;
+				text
+					.setPlaceholder(DEFAULT_CLEANUP_PROMPT)
+					.setValue(this.plugin.settings.cleanupPrompt)
+					.onChange(async (value) => {
+						this.plugin.settings.cleanupPrompt = value || DEFAULT_CLEANUP_PROMPT;
+						await this.plugin.saveSettings();
+					});
+				text.inputEl.rows = 8;
+				text.inputEl.addClass("ai-transcribe-summary-prompt");
+			});
+
+		new Setting(cleanupDetailsEl)
+			.setClass("ai-transcribe-summary-prompt-reset")
+			.addButton((button) =>
+				button
+					.setIcon("rotate-ccw")
+					.setButtonText("Reset to default prompt")
+					.onClick(async () => {
+						this.plugin.settings.cleanupPrompt = DEFAULT_CLEANUP_PROMPT;
+						await this.plugin.saveSettings();
+						cleanupPromptTextArea?.setValue(DEFAULT_CLEANUP_PROMPT);
+					})
+			);
 	}
 
 	private renderSummaryOutputSettings(containerEl: HTMLElement): void {

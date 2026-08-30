@@ -1,6 +1,6 @@
 import { App, Menu, Modal, normalizePath, Notice, Plugin, Setting, TAbstractFile, TFile, TFolder } from "obsidian";
 import { AudioRecorder, RecordingResult } from "./audio/recorder";
-import { isAudioFile, runTranscribeAndSummarizePipeline } from "./pipeline";
+import { formatTimestampForFilename, isAudioFile, runTranscribeAndSummarizePipeline } from "./pipeline";
 import { AiTranscribeSummarySettingTab, AiTranscribeSummarySettings, DEFAULT_SETTINGS } from "./settings";
 
 /** audio/webm -> webm, audio/ogg;codecs=opus -> ogg, etc. */
@@ -8,6 +8,9 @@ function extensionForMimeType(mimeType: string): string {
 	const subtype = mimeType.split(";")[0].split("/")[1];
 	return subtype || "webm";
 }
+
+/** Single-character spinner frames - fixed width, so the status bar item doesn't resize/jitter as it animates (unlike a growing "..." suffix). */
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 const EXTENSION_MIME_TYPES: Record<string, string> = {
 	webm: "audio/webm",
@@ -18,11 +21,6 @@ const EXTENSION_MIME_TYPES: Record<string, string> = {
 
 function mimeTypeForExtension(extension: string): string {
 	return EXTENSION_MIME_TYPES[extension.toLowerCase()] ?? "application/octet-stream";
-}
-
-function formatTimestampForFilename(date: Date): string {
-	const pad = (n: number) => n.toString().padStart(2, "0");
-	return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}-${pad(date.getMinutes())}-${pad(date.getSeconds())}`;
 }
 
 function formatElapsed(ms: number): string {
@@ -73,6 +71,10 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 	private timerIntervalId: number | undefined;
 	private ribbonIconEl!: HTMLElement;
 	private recorder = new AudioRecorder();
+
+	private pipelineStatus = "";
+	private pipelineAnimationIntervalId: number | undefined;
+	private pipelineAnimationFrame = 0;
 
 	async onload() {
 		await this.loadSettings();
@@ -152,11 +154,27 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 	}
 
 	private showPipelineProgress(status: string) {
-		this.statusBarItem.setText(status);
+		this.pipelineStatus = status;
 		this.statusBarItem.show();
+		this.renderPipelineProgress();
+
+		if (this.pipelineAnimationIntervalId === undefined) {
+			this.pipelineAnimationIntervalId = window.setInterval(() => this.renderPipelineProgress(), 100);
+			this.registerInterval(this.pipelineAnimationIntervalId);
+		}
+	}
+
+	private renderPipelineProgress() {
+		const frame = SPINNER_FRAMES[this.pipelineAnimationFrame];
+		this.pipelineAnimationFrame = (this.pipelineAnimationFrame + 1) % SPINNER_FRAMES.length;
+		this.statusBarItem.setText(`${frame} ${this.pipelineStatus}`);
 	}
 
 	private hidePipelineProgress() {
+		if (this.pipelineAnimationIntervalId !== undefined) {
+			window.clearInterval(this.pipelineAnimationIntervalId);
+			this.pipelineAnimationIntervalId = undefined;
+		}
 		if (this.state === "idle") {
 			this.statusBarItem.hide();
 		}
@@ -308,7 +326,26 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 	}
 
 	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+		const saved: Partial<AiTranscribeSummarySettings> = (await this.loadData()) ?? {};
+
+		// Object.assign only merges top-level keys - a saved settings file from
+		// before a field was added to a nested per-provider object (e.g.
+		// temperature) would otherwise replace that whole object wholesale and
+		// leave the new field undefined, instead of falling back to its default.
+		this.settings = {
+			...DEFAULT_SETTINGS,
+			...saved,
+			providers: {
+				whisper: { ...DEFAULT_SETTINGS.providers.whisper, ...saved.providers?.whisper },
+				assemblyai: { ...DEFAULT_SETTINGS.providers.assemblyai, ...saved.providers?.assemblyai },
+			},
+			summaryProviders: {
+				openai: { ...DEFAULT_SETTINGS.summaryProviders.openai, ...saved.summaryProviders?.openai },
+				openrouter: { ...DEFAULT_SETTINGS.summaryProviders.openrouter, ...saved.summaryProviders?.openrouter },
+				anthropic: { ...DEFAULT_SETTINGS.summaryProviders.anthropic, ...saved.summaryProviders?.anthropic },
+				google: { ...DEFAULT_SETTINGS.summaryProviders.google, ...saved.summaryProviders?.google },
+			},
+		};
 	}
 
 	async saveSettings() {

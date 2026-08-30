@@ -39,7 +39,7 @@ export class WhisperTranscriptionProvider implements TranscriptionProvider {
 		const texts: string[] = [];
 		for (const [index, piece] of pieces.entries()) {
 			if (pieces.length > 1) {
-				onProgress(`Transcribing chunk ${index + 1}/${pieces.length}...`);
+				onProgress(`Transcribing chunk ${index + 1}/${pieces.length}`);
 			}
 			texts.push(await this.transcribeOnePiece(piece, request.vocabularyHints, index, pieces.length));
 		}
