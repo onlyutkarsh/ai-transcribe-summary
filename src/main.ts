@@ -36,6 +36,15 @@ function mimeTypeForExtension(extension: string): string {
  */
 const LONG_RECORDING_WARNING_MS = 3 * 60 * 60 * 1000;
 
+/**
+ * Below this duration a recording is too short to contain any real speech -
+ * the encoded blob is essentially just container/header bytes. Sending that
+ * to the transcription provider fails with an opaque HTTP 400 ("Provider
+ * returned 400") rather than a message that explains what happened, so this
+ * is checked up front and short-circuits with a clear Notice instead.
+ */
+const MIN_RECORDING_MS = 1000;
+
 function formatElapsed(ms: number): string {
 	const totalSeconds = Math.floor(ms / 1000);
 	const hours = Math.floor(totalSeconds / 3600);
@@ -64,6 +73,44 @@ class StopRecordingConfirmModal extends Modal {
 				button
 					.setButtonText("Stop recording")
 					.setDestructive()
+					.setCta()
+					.onClick(() => {
+						this.confirmed = true;
+						this.close();
+						this.onConfirm();
+					})
+			);
+	}
+
+	onClose() {
+		this.contentEl.empty();
+		if (!this.confirmed) this.onCancel();
+	}
+}
+
+/**
+ * Confirms before starting a recording when triggered from the ribbon icon -
+ * dragging the ribbon icon to reorder it (Obsidian lets users drag ribbon
+ * icons in the sidebar) can register as a click on mouseup and silently
+ * start recording. The command palette/hotkey path skips this since it
+ * can't be triggered by a drag.
+ */
+class StartRecordingConfirmModal extends Modal {
+	private confirmed = false;
+
+	constructor(app: App, private onConfirm: () => void, private onCancel: () => void) {
+		super(app);
+	}
+
+	onOpen() {
+		this.setTitle("Start recording?");
+		this.contentEl.createEl("p", { text: "This will start recording audio from your microphone." });
+
+		new Setting(this.contentEl)
+			.addButton((button) => button.setButtonText("Cancel").onClick(() => this.close()))
+			.addButton((button) =>
+				button
+					.setButtonText("Start recording")
 					.setCta()
 					.onClick(() => {
 						this.confirmed = true;
@@ -119,11 +166,12 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 		this.ribbonIconEl = this.addRibbonIcon("mic", "Start meeting recording", () => {
 			if (this.transitioning) return;
 			if (this.state === "idle") {
-				void this.startRecording();
+				this.requestStartRecording();
 			} else {
-				this.requestStopRecording();
+				this.requestStopRecording(true);
 			}
 		});
+		this.ribbonIconEl.addClass("ai-transcribe-summary-ribbon-icon");
 
 		this.addCommand({
 			id: "start-recording",
@@ -268,8 +316,9 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 		}
 	}
 
-	private requestStopRecording() {
-		if (this.settings.confirmBeforeStoppingRecording) {
+	/** Ribbon icon clicks always confirm (forceConfirm) since dragging the ribbon icon to reorder it can register as a click; the command palette/hotkey path only confirms when the user has opted into confirmBeforeStoppingRecording. */
+	private requestStopRecording(forceConfirm = false) {
+		if (forceConfirm || this.settings.confirmBeforeStoppingRecording) {
 			// Reserve the transition immediately so a second stop action can't open another
 			// confirm modal while this one is still open - only one stopRecording() may run
 			// against the recorder at a time. Released if the user cancels.
@@ -284,6 +333,18 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 		} else {
 			void this.stopRecording();
 		}
+	}
+
+	/** Always confirms before starting - used only by the ribbon icon, since dragging it to reorder can register as a click and silently start recording (see StartRecordingConfirmModal). */
+	private requestStartRecording() {
+		this.transitioning = true;
+		new StartRecordingConfirmModal(
+			this.app,
+			() => void this.startRecording(),
+			() => {
+				this.transitioning = false;
+			}
+		).open();
 	}
 
 	private togglePause() {
@@ -369,6 +430,11 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 		this.transitioning = false;
 		this.ribbonIconEl.removeClass("is-active");
 		this.ribbonIconEl.setAttribute("aria-label", "Start meeting recording");
+
+		if (result.durationMs < MIN_RECORDING_MS) {
+			new Notice("Recording was too short to transcribe - nothing was saved.");
+			return;
+		}
 
 		// Raw audio is always preserved regardless of what transcription/summary do downstream.
 		let savedFile: TFile | undefined;

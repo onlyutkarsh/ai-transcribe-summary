@@ -21,3 +21,7 @@
 	padding-top: 0;
 	justify-content: flex-end;
 }
+
+.ai-transcribe-summary-ribbon-icon.is-active {
+	color: var(--color-red);
+}
