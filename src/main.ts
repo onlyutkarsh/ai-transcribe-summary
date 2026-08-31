@@ -1,4 +1,4 @@
-import { App, Editor, MarkdownFileInfo, MarkdownView, Menu, Modal, normalizePath, Notice, Plugin, Setting, TAbstractFile, TFile, TFolder } from "obsidian";
+import { App, Editor, MarkdownView, Menu, Modal, normalizePath, Notice, Plugin, Setting, TAbstractFile, TFile, TFolder } from "obsidian";
 import { AudioRecorder, RecordingResult } from "./audio/recorder";
 import { formatTimestampForFilename, isAudioFile, logDebug, RequestAbortedError, runSummarizeTextPipeline, runTranscribeAndSummarizePipeline } from "./pipeline";
 import { AiTranscribeSummarySettingTab, AiTranscribeSummarySettings, DEFAULT_SETTINGS } from "./settings";
@@ -232,20 +232,9 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 			editorCallback: (editor, view) => void this.summarizeText(editor, editor.getValue(), false, view.file?.basename ?? "note"),
 		});
 
-		this.addCommand({
-			id: "summarize-selection",
-			name: "Summarize selection",
-			editorCheckCallback: (checking, editor, view) => {
-				if (!editor.somethingSelected()) return false;
-				if (!checking) void this.summarizeText(editor, editor.getSelection(), true, view.file?.basename ?? "selection");
-				return true;
-			},
-		});
-
 		this.addSettingTab(new AiTranscribeSummarySettingTab(this.app, this));
 
 		this.registerEvent(this.app.workspace.on("file-menu", (menu, file) => this.onFileMenu(menu, file)));
-		this.registerEvent(this.app.workspace.on("editor-menu", (menu, editor, view) => this.onEditorMenu(menu, editor, view)));
 
 		this.lastMarkdownView = this.app.workspace.getActiveViewOfType(MarkdownView) ?? undefined;
 		this.registerEvent(
@@ -278,17 +267,6 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 					.onClick(() => void this.summarizeNoteFile(file))
 			);
 		}
-	}
-
-	private onEditorMenu(menu: Menu, editor: Editor, view: MarkdownView | MarkdownFileInfo) {
-		if (!editor.somethingSelected()) return;
-
-		menu.addItem((item) =>
-			item
-				.setTitle("Summarize selection")
-				.setIcon("captions")
-				.onClick(() => void this.summarizeText(editor, editor.getSelection(), true, view.file?.basename ?? "selection"))
-		);
 	}
 
 	/** Right-click "Summarize note" - unlike the editor-command path, the file clicked from the file explorer isn't necessarily the active editor, so this opens/activates it first to get an Editor to write the summary into. */
