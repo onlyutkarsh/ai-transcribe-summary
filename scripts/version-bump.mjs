@@ -1,6 +1,10 @@
 import { readFileSync, writeFileSync } from "fs";
 
-const targetVersion = process.env.npm_package_version;
+const targetVersion = process.argv[2] || process.env.npm_package_version;
+if (!targetVersion) {
+	console.error("Usage: node version-bump.mjs <version>");
+	process.exit(1);
+}
 
 let manifest = JSON.parse(readFileSync("manifest.json", "utf8"));
 const { minAppVersion } = manifest;

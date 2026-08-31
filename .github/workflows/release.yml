@@ -53,17 +53,8 @@ jobs:
 
       - name: Bump version (package.json, manifest.json, versions.json)
         run: |
-          CURRENT_PKG_VERSION=$(node -p "require('./package.json').version")
-          CURRENT_MANIFEST_VERSION=$(node -p "require('./manifest.json').version || ''")
-          if [ "$CURRENT_PKG_VERSION" != "${{ inputs.version }}" ]; then
-            npm version ${{ inputs.version }} --no-git-tag-version
-            node scripts/version-bump.mjs
-          elif [ "$CURRENT_MANIFEST_VERSION" != "${{ inputs.version }}" ]; then
-            echo "package.json already at ${{ inputs.version }} but manifest.json is out of sync, re-running version-bump"
-            node scripts/version-bump.mjs
-          else
-            echo "Version is already ${{ inputs.version }}, skipping version bump"
-          fi
+          npm version ${{ inputs.version }} --no-git-tag-version --allow-same-version
+          node scripts/version-bump.mjs ${{ inputs.version }}
 
       - name: Build plugin
         run: npm run build
