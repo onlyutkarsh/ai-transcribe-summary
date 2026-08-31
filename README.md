@@ -1,4 +1,4 @@
-# AI Transcribe & Summary
+# AI Transcribe and Summary
 
 An Obsidian plugin for recording meetings, transcribing them reliably, and turning the transcript into a structured summary - without losing audio to size limits, silence, or a bad API response.
 
@@ -40,8 +40,8 @@ This plugin is built around avoiding those failure modes specifically:
 ## Getting started
 
 1. Install the plugin (see below) and enable it in Obsidian's Community Plugins settings.
-2. Open **Settings → AI Transcribe & Summary** and add an API key for your chosen transcription provider (Whisper/OpenRouter is the default) and summary provider.
-3. Click the microphone icon in the ribbon, or run **AI Transcribe & Summary: Start recording** from the command palette.
+2. Open **Settings → AI Transcribe and Summary** and add an API key for your chosen transcription provider (Whisper/OpenRouter is the default) and summary provider.
+3. Click the microphone icon in the ribbon, or run **AI Transcribe and Summary: Start recording** from the command palette.
 4. When you're done, stop the recording. The audio is saved, transcribed, and summarized automatically - the summary lands at your cursor if you have a note open, or in a new note otherwise.
 
 To process an audio file you already have in your vault, right-click it and choose **Transcribe & summarize**.
