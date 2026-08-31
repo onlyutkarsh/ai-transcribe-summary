@@ -1,6 +1,6 @@
 import { App, MarkdownView, Menu, Modal, normalizePath, Notice, Plugin, Setting, TAbstractFile, TFile, TFolder } from "obsidian";
 import { AudioRecorder, RecordingResult } from "./audio/recorder";
-import { formatTimestampForFilename, isAudioFile, runTranscribeAndSummarizePipeline } from "./pipeline";
+import { formatTimestampForFilename, isAudioFile, logDebug, RequestAbortedError, runTranscribeAndSummarizePipeline } from "./pipeline";
 import { AiTranscribeSummarySettingTab, AiTranscribeSummarySettings, DEFAULT_SETTINGS } from "./settings";
 
 /** audio/webm -> webm, audio/ogg;codecs=opus -> ogg, etc. */
@@ -153,6 +153,8 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 
 	/** One entry per in-flight pipeline job (a right-click "Transcribe & summarize", or the post-recording pipeline), keyed by a locally-unique id - so one job finishing doesn't stop/hide the shared status bar spinner while others are still running. */
 	private activePipelineJobs = new Map<number, string>();
+	/** AbortController per in-flight pipeline job, keyed the same as activePipelineJobs - "Stop transcription/summary" aborts every job currently running, since the status bar/command palette don't distinguish which job is which. */
+	private pipelineJobControllers = new Map<number, AbortController>();
 	private nextPipelineJobId = 0;
 	private pipelineAnimationIntervalId: number | undefined;
 	private pipelineAnimationFrame = 0;
@@ -214,6 +216,16 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 			},
 		});
 
+		this.addCommand({
+			id: "stop-transcription-summary",
+			name: "Stop transcription/summary",
+			checkCallback: (checking) => {
+				if (this.pipelineJobControllers.size === 0) return false;
+				if (!checking) this.stopPipelineJobs();
+				return true;
+			},
+		});
+
 		this.addSettingTab(new AiTranscribeSummarySettingTab(this.app, this));
 
 		this.registerEvent(this.app.workspace.on("file-menu", (menu, file) => this.onFileMenu(menu, file)));
@@ -240,26 +252,47 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 	}
 
 	private async transcribeAndSummarizeFile(file: TFile): Promise<void> {
-		const jobId = this.beginPipelineJob();
+		const { jobId, signal } = this.beginPipelineJob();
 		try {
 			const blob = new Blob([await this.app.vault.readBinary(file)], { type: mimeTypeForExtension(file.extension) });
 			await runTranscribeAndSummarizePipeline(
 				this.app,
 				this.settings,
 				{ blob, mimeType: blob.type, baseName: file.basename, audioFile: file },
-				{ targetView: this.lastMarkdownView, onProgress: (status) => this.showPipelineProgress(jobId, status) }
+				{ targetView: this.lastMarkdownView, onProgress: (status) => this.showPipelineProgress(jobId, status), signal }
 			);
 		} catch (error) {
-			console.error("ai-transcribe-summary: transcribe & summarize failed", error);
-			new Notice(`Transcribe & summarize failed: ${error instanceof Error ? error.message : String(error)}`);
+			this.reportPipelineError("transcribe & summarize", error);
 		} finally {
 			this.endPipelineJob(jobId);
 		}
 	}
 
-	/** Registers a new pipeline job and returns its id, to be passed to showPipelineProgress/endPipelineJob for the lifetime of that job. */
-	private beginPipelineJob(): number {
-		return this.nextPipelineJobId++;
+	/** Logs and surfaces a pipeline failure - a user-initiated stop gets a neutral Notice instead of the usual red "failed" one. */
+	private reportPipelineError(action: string, error: unknown) {
+		if (error instanceof RequestAbortedError) {
+			logDebug(`${action} stopped by user`, error);
+			new Notice(error.message);
+			return;
+		}
+		console.error(`ai-transcribe-summary: ${action} failed`, error);
+		new Notice(`${action[0].toUpperCase()}${action.slice(1)} failed: ${error instanceof Error ? error.message : String(error)}`);
+	}
+
+	/** Registers a new pipeline job with its own AbortController and returns its id/signal, to be passed to showPipelineProgress/endPipelineJob for the lifetime of that job. */
+	private beginPipelineJob(): { jobId: number; signal: AbortSignal } {
+		const jobId = this.nextPipelineJobId++;
+		const controller = new AbortController();
+		this.pipelineJobControllers.set(jobId, controller);
+		return { jobId, signal: controller.signal };
+	}
+
+	/** Aborts every currently-running pipeline job - triggered by the "Stop transcription/summary" command since the status bar/command palette don't distinguish which job is which. */
+	private stopPipelineJobs() {
+		for (const controller of this.pipelineJobControllers.values()) {
+			controller.abort();
+		}
+		new Notice("Stopping...");
 	}
 
 	private showPipelineProgress(jobId: number, status: string) {
@@ -290,6 +323,7 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 	/** Ends one pipeline job. Only stops the shared spinner/hides the status bar once no other job is still active. */
 	private endPipelineJob(jobId: number) {
 		this.activePipelineJobs.delete(jobId);
+		this.pipelineJobControllers.delete(jobId);
 		if (this.activePipelineJobs.size > 0) {
 			this.renderPipelineProgress();
 			return;
@@ -455,17 +489,16 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 			);
 		}
 
-		const jobId = this.beginPipelineJob();
+		const { jobId, signal } = this.beginPipelineJob();
 		try {
 			await runTranscribeAndSummarizePipeline(
 				this.app,
 				this.settings,
 				{ blob: result.blob, mimeType: result.mimeType, baseName: savedFile?.basename ?? `meeting ${formatTimestampForFilename(new Date())}`, audioFile: savedFile },
-				{ targetView: this.lastMarkdownView, onProgress: (status) => this.showPipelineProgress(jobId, status) }
+				{ targetView: this.lastMarkdownView, onProgress: (status) => this.showPipelineProgress(jobId, status), signal }
 			);
 		} catch (error) {
-			console.error("ai-transcribe-summary: transcribe & summarize failed", error);
-			new Notice(`Transcribe & summarize failed: ${error instanceof Error ? error.message : String(error)}`);
+			this.reportPipelineError("transcribe & summarize", error);
 		} finally {
 			this.endPipelineJob(jobId);
 		}

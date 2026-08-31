@@ -4,6 +4,8 @@ export interface SummaryRequest {
 	transcript: string;
 	/** Rendered summaryPrompt from settings (default or user-customized). */
 	prompt: string;
+	/** When aborted, the provider stops waiting on/starting further requests and rejects with RequestAbortedError. */
+	signal?: AbortSignal;
 }
 
 export interface SummaryResult {

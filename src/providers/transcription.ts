@@ -12,6 +12,8 @@ export interface TranscriptionRequest {
 	language: string;
 	/** Called with a short status string as a provider makes progress (e.g. per-chunk upload progress). */
 	onProgress?: (status: string) => void;
+	/** When aborted, the provider stops waiting on/starting further requests and rejects with RequestAbortedError. */
+	signal?: AbortSignal;
 }
 
 export interface TranscriptionResult {

@@ -2,7 +2,10 @@ import { App, MarkdownView, normalizePath, Notice, TFile, TFolder } from "obsidi
 import { logDebug } from "./log";
 import { createSummaryProvider, createTranscriptionProvider, resolveSummaryApiKey } from "./providers/factory";
 import { summarizeLongTranscript } from "./providers/map-reduce-summarizer";
+import { RequestAbortedError } from "./providers/request-timeout";
 import { AiTranscribeSummarySettings, transcriptionKeyReuseTarget } from "./settings";
+
+export { RequestAbortedError };
 
 export { logDebug };
 
@@ -65,9 +68,10 @@ export async function runTranscribeAndSummarizePipeline(
 	app: App,
 	settings: AiTranscribeSummarySettings,
 	source: AudioSource,
-	options: { targetView: MarkdownView | undefined; onProgress?: ProgressCallback }
+	options: { targetView: MarkdownView | undefined; onProgress?: ProgressCallback; signal?: AbortSignal }
 ): Promise<void> {
 	const onProgress = options.onProgress ?? (() => {});
+	const signal = options.signal;
 
 	logDebug("pipeline started", {
 		baseName: source.baseName,
@@ -102,6 +106,7 @@ export async function runTranscribeAndSummarizePipeline(
 		vocabularyHints: settings.vocabularyHints,
 		language: settings.transcriptionLanguage,
 		onProgress,
+		signal,
 	});
 	logDebug("transcription finished", { durationMs: Date.now() - transcribeStartedAt, textLength: transcription.text.length, repetitionWarning: transcription.repetitionWarning });
 
@@ -127,6 +132,7 @@ export async function runTranscribeAndSummarizePipeline(
 			const cleanupResult = await cleanupProvider.summarize({
 				transcript: transcriptText,
 				prompt: settings.cleanupPrompt,
+				signal,
 			});
 			logDebug("cleanup finished", { durationMs: Date.now() - cleanupStartedAt, textLength: cleanupResult.summary.length });
 			transcriptText = cleanupResult.summary.trim() || transcriptText;
@@ -146,7 +152,7 @@ export async function runTranscribeAndSummarizePipeline(
 		onProgress("Generating summary");
 		new Notice(`Generating summary for "${source.baseName}"...`);
 		const summarizeStartedAt = Date.now();
-		const summaryResult = await summarizeLongTranscript(summaryProvider, { transcript: transcriptText, prompt: settings.summaryPrompt }, onProgress);
+		const summaryResult = await summarizeLongTranscript(summaryProvider, { transcript: transcriptText, prompt: settings.summaryPrompt, signal }, onProgress);
 		logDebug("summary finished", { durationMs: Date.now() - summarizeStartedAt, summaryLength: summaryResult.summary.length });
 
 		// Audio link travels with the summary, not the transcript - it belongs in the main note
@@ -165,8 +171,16 @@ export async function runTranscribeAndSummarizePipeline(
 		new Notice(`Summary ready for "${source.baseName}".`);
 		logDebug("pipeline finished (summary)");
 	} catch (error) {
-		logDebug("pipeline failed after transcription, saving raw transcript", error);
+		const cancelled = error instanceof RequestAbortedError;
+		logDebug(cancelled ? "pipeline cancelled after transcription, saving raw transcript" : "pipeline failed after transcription, saving raw transcript", error);
 		const rescuePath = await tryWriteRescueTranscript(app, settings, source, transcription.text);
+
+		if (cancelled) {
+			throw new RequestAbortedError(
+				rescuePath ? `Stopped. The transcript so far was saved to "${rescuePath}".` : "Stopped."
+			);
+		}
+
 		const message = error instanceof Error ? error.message : String(error);
 		throw new Error(
 			rescuePath
