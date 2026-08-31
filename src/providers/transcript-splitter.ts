@@ -44,7 +44,14 @@ export function splitTranscriptForSummary(transcript: string, maxChunkChars = SU
 
 /** Splits a single paragraph too large to fit in one chunk, breaking at sentence boundaries and falling back to a hard character cut for a single run-on sentence longer than the limit. */
 function splitOversizedParagraph(paragraph: string, maxChunkChars: number): string[] {
-	const sentences = paragraph.split(/(?<=[.!?])\s+/);
+	const sentences = paragraph.split(/([.!?]+\s+)/).reduce<string[]>((acc, part, index) => {
+		if (index % 2 === 0) {
+			acc.push(part);
+		} else {
+			acc[acc.length - 1] += part;
+		}
+		return acc;
+	}, []).filter((sentence) => sentence.length > 0);
 	const chunks: string[] = [];
 	let current = "";
 
