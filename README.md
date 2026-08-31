@@ -19,10 +19,12 @@ Real meetings expose a few common failure modes in Whisper-based transcription:
 
 This plugin is built around avoiding those failure modes specifically:
 
-- Long recordings are automatically split at natural silence gaps and transcribed in pieces before they ever hit the size ceiling - you don't need to do anything.
+- Long recordings are automatically split at natural silence gaps and transcribed in pieces (in parallel, to keep total wait time down) before they ever hit the size ceiling - you don't need to do anything. If no silence gap is found near a split point (e.g. continuous speech with no pause), that piece falls back to a hard cut at the target size rather than failing.
+- Very long transcripts are summarized in parts and combined, rather than sent as one oversized request - this keeps summary quality consistent and avoids failures on meetings that would otherwise be too long for a single request.
 - Transcripts are scanned for repetition-loop artifacts; if one is found, a warning is added to the note instead of silently trusting the output.
-- The recorded audio is saved to your vault before transcription or summarization is even attempted, so a failure downstream never costs you the recording.
+- The recorded audio is saved to your vault before transcription or summarization is even attempted, so a failure downstream never costs you the recording. If cleanup or summary generation fails after transcription succeeds, the transcript itself is also saved immediately, so a slow or failed API call never costs you a re-transcription.
 - Recording can auto-stop after a period of silence, with a hard maximum-duration backstop as a second line of defense.
+- For a recording several hours long, you'll get a heads-up if splitting it for transcription might use a lot of memory on your device - the audio is already safely saved either way.
 
 ## Features
 
@@ -70,13 +72,17 @@ Every prompt (summary and cleanup) is fully editable, with a one-click reset bac
 
 - Obsidian 1.5.0 or later.
 - An API key for at least one transcription provider (OpenAI or OpenRouter) and, if you want summaries, one summary provider.
-- Works on desktop and mobile for recording and right-click retry; the live status bar timer is desktop only.
+- Desktop only.
 
 ## Limitations
 
 - Speaker diarization ("who said what") isn't supported - this uses a single mic input.
 - This isn't a live/real-time transcription tool - it's record-then-process.
 - No speech-to-text system is 100% accurate. Custom vocabulary hints help with recurring names and jargon, but occasional misheard words on messy audio are expected.
+
+## Development
+
+Built with the help of AI coding assistants.
 
 ## License
 

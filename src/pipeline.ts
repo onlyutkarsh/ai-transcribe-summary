@@ -1,12 +1,10 @@
 import { App, MarkdownView, normalizePath, Notice, TFile, TFolder } from "obsidian";
+import { logDebug } from "./log";
 import { createSummaryProvider, createTranscriptionProvider, resolveSummaryApiKey } from "./providers/factory";
+import { summarizeLongTranscript } from "./providers/map-reduce-summarizer";
 import { AiTranscribeSummarySettings, transcriptionKeyReuseTarget } from "./settings";
 
-const LOG_PREFIX = "ai-transcribe-summary:";
-
-export function logDebug(...args: unknown[]): void {
-	console.debug(LOG_PREFIX, ...args);
-}
+export { logDebug };
 
 export function formatTimestampForFilename(date: Date): string {
 	const pad = (n: number) => n.toString().padStart(2, "0");
@@ -95,59 +93,87 @@ export async function runTranscribeAndSummarizePipeline(
 		new Notice(`Warning: possible repetition-loop artifact detected in the transcript for "${source.baseName}".`);
 	}
 
-	let transcriptText = transcription.text;
-	if (settings.cleanupTranscript) {
-		const cleanupProvider = createSummaryProvider(settings);
-		logDebug("cleanup provider resolved", cleanupProvider.id);
-
-		onProgress("Cleaning up transcript");
-		new Notice(`Cleaning up transcript for "${source.baseName}"...`);
-		const cleanupStartedAt = Date.now();
-		const cleanupResult = await cleanupProvider.summarize({
-			transcript: transcriptText,
-			prompt: settings.cleanupPrompt,
-		});
-		logDebug("cleanup finished", { durationMs: Date.now() - cleanupStartedAt, textLength: cleanupResult.summary.length });
-		transcriptText = cleanupResult.summary.trim() || transcriptText;
-	}
-
 	const audioLinkMarkdown = source.audioFile ? buildAudioLinkMarkdown(app, source.audioFile, activeView?.file?.path ?? "") : "";
 
-	if (!settings.generateSummary) {
-		onProgress("Saving transcript");
-		await writeTranscriptFile(app, settings, source.baseName, buildTranscriptMarkdown(transcriptText), source.audioFile);
-		new Notice(`Transcript ready for "${source.baseName}".`);
-		logDebug("pipeline finished (transcript only)");
-		return;
+	// From here on (cleanup, summary, writing the note) a failure would otherwise discard a
+	// transcript that already cost a real transcription API call to produce. Catch it, save the
+	// raw transcript immediately so that cost isn't wasted, and tell the user where it landed
+	// instead of just surfacing the underlying error.
+	try {
+		let transcriptText = transcription.text;
+		if (settings.cleanupTranscript) {
+			const cleanupProvider = createSummaryProvider(settings);
+			logDebug("cleanup provider resolved", cleanupProvider.id);
+
+			onProgress("Cleaning up transcript");
+			new Notice(`Cleaning up transcript for "${source.baseName}"...`);
+			const cleanupStartedAt = Date.now();
+			const cleanupResult = await cleanupProvider.summarize({
+				transcript: transcriptText,
+				prompt: settings.cleanupPrompt,
+			});
+			logDebug("cleanup finished", { durationMs: Date.now() - cleanupStartedAt, textLength: cleanupResult.summary.length });
+			transcriptText = cleanupResult.summary.trim() || transcriptText;
+		}
+
+		if (!settings.generateSummary) {
+			onProgress("Saving transcript");
+			await writeTranscriptFile(app, settings, source.baseName, buildTranscriptMarkdown(transcriptText), source.audioFile);
+			new Notice(`Transcript ready for "${source.baseName}".`);
+			logDebug("pipeline finished (transcript only)");
+			return;
+		}
+
+		const summaryProvider = createSummaryProvider(settings);
+		logDebug("summary provider resolved", summaryProvider.id);
+
+		onProgress("Generating summary");
+		new Notice(`Generating summary for "${source.baseName}"...`);
+		const summarizeStartedAt = Date.now();
+		const summaryResult = await summarizeLongTranscript(summaryProvider, { transcript: transcriptText, prompt: settings.summaryPrompt }, onProgress);
+		logDebug("summary finished", { durationMs: Date.now() - summarizeStartedAt, summaryLength: summaryResult.summary.length });
+
+		// Audio link travels with the summary, not the transcript - it belongs in the main note
+		// (where the summary lands) even when transcript placement is "dedicated-file" and the
+		// transcript itself goes to a separate file the user may not open right away.
+		const summaryMarkdown = `${audioLinkMarkdown}${buildSummaryMarkdown(summaryResult.summary, transcription.repetitionWarning)}`;
+		const transcriptMarkdown = buildTranscriptMarkdown(transcriptText);
+
+		onProgress("Saving results");
+		if (activeView) {
+			await writeIntoActiveNote(activeView, settings, summaryMarkdown, transcriptMarkdown, source.audioFile);
+		} else {
+			await writeIntoNewNote(app, settings, source.baseName, summaryMarkdown, transcriptMarkdown, source.audioFile);
+		}
+
+		new Notice(`Summary ready for "${source.baseName}".`);
+		logDebug("pipeline finished (summary)");
+	} catch (error) {
+		logDebug("pipeline failed after transcription, saving raw transcript", error);
+		const rescuePath = await tryWriteRescueTranscript(app, settings, source, transcription.text);
+		const message = error instanceof Error ? error.message : String(error);
+		throw new Error(
+			rescuePath
+				? `${message}\n\nThe transcript was already produced and has been saved to "${rescuePath}" so it isn't lost. Fix the issue above, then re-run "Transcribe & summarize" on the audio file - or use the saved transcript directly.`
+				: message,
+			{ cause: error }
+		);
 	}
+}
 
-	const summaryProvider = createSummaryProvider(settings);
-	logDebug("summary provider resolved", summaryProvider.id);
-
-	onProgress("Generating summary");
-	new Notice(`Generating summary for "${source.baseName}"...`);
-	const summarizeStartedAt = Date.now();
-	const summaryResult = await summaryProvider.summarize({
-		transcript: transcriptText,
-		prompt: settings.summaryPrompt,
-	});
-	logDebug("summary finished", { durationMs: Date.now() - summarizeStartedAt, summaryLength: summaryResult.summary.length });
-
-	// Audio link travels with the summary, not the transcript - it belongs in the main note
-	// (where the summary lands) even when transcript placement is "dedicated-file" and the
-	// transcript itself goes to a separate file the user may not open right away.
-	const summaryMarkdown = `${audioLinkMarkdown}${buildSummaryMarkdown(summaryResult.summary, transcription.repetitionWarning)}`;
-	const transcriptMarkdown = buildTranscriptMarkdown(transcriptText);
-
-	onProgress("Saving results");
-	if (activeView) {
-		await writeIntoActiveNote(activeView, settings, summaryMarkdown, transcriptMarkdown, source.audioFile);
-	} else {
-		await writeIntoNewNote(app, settings, source.baseName, summaryMarkdown, transcriptMarkdown, source.audioFile);
+/** Best-effort rescue save of the raw transcript after a post-transcription failure - swallows its own errors so a failure here doesn't replace the original, more useful error with an unrelated file-write one. */
+async function tryWriteRescueTranscript(app: App, settings: AiTranscribeSummarySettings, source: AudioSource, transcriptText: string): Promise<string | undefined> {
+	try {
+		const folderPath = normalizePath(settings.transcriptFolder);
+		await ensureFolder(app, folderPath);
+		const rescuePath = resolveNonCollidingPath(app, folderPath, `${source.baseName} (rescued transcript)`);
+		const audioLinkMarkdown = source.audioFile ? buildAudioLinkMarkdown(app, source.audioFile, rescuePath) : "";
+		await app.vault.create(rescuePath, `${audioLinkMarkdown}${buildTranscriptMarkdown(transcriptText)}`);
+		return rescuePath;
+	} catch (rescueError) {
+		logDebug("rescue transcript save also failed", rescueError);
+		return undefined;
 	}
-
-	new Notice(`Summary ready for "${source.baseName}".`);
-	logDebug("pipeline finished (summary)");
 }
 
 function buildSummaryMarkdown(summary: string, repetitionWarning: boolean): string {
@@ -172,7 +198,7 @@ function buildTranscriptMarkdown(transcript: string): string {
  */
 function buildAudioLinkMarkdown(app: App, audioFile: TFile, sourcePath: string): string {
 	const link = app.fileManager.generateMarkdownLink(audioFile, sourcePath);
-	return `**Audio:** !${link}\n\n`;
+	return `!${link}\n\n`;
 }
 
 async function writeIntoActiveNote(

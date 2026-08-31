@@ -24,6 +24,18 @@ function mimeTypeForExtension(extension: string): string {
 	return EXTENSION_MIME_TYPES[extension.toLowerCase()] ?? "application/octet-stream";
 }
 
+/**
+ * Above this duration, splitting an oversized recording (chunker.ts's
+ * chunkAtSilence) decodes to a large enough in-memory PCM buffer that it
+ * risks exhausting tab memory on constrained machines - warn before it
+ * happens rather than let the decode fail unpredictably. Based on duration
+ * alone (not file size, which varies with the configured bitrate) since
+ * that's what drives decoded PCM size; assumes a worst-case stereo/48kHz
+ * source (~2GB at 3hrs) since MediaRecorder doesn't expose the actual
+ * sample rate/channel count picked by the browser/OS.
+ */
+const LONG_RECORDING_WARNING_MS = 3 * 60 * 60 * 1000;
+
 function formatElapsed(ms: number): string {
 	const totalSeconds = Math.floor(ms / 1000);
 	const hours = Math.floor(totalSeconds / 3600);
@@ -128,6 +140,17 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 			checkCallback: (checking) => {
 				if (this.state === "idle" || this.transitioning) return false;
 				if (!checking) this.togglePause();
+				return true;
+			},
+		});
+
+		this.addCommand({
+			id: "transcribe-and-summarize-active-file",
+			name: "Transcribe & summarize active file",
+			checkCallback: (checking) => {
+				const file = this.app.workspace.getActiveFile();
+				if (!file || !isAudioFile(file)) return false;
+				if (!checking) void this.transcribeAndSummarizeFile(file);
 				return true;
 			},
 		});
@@ -331,6 +354,15 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 		let savedFile: TFile | undefined;
 		if (this.settings.saveAudioFile) {
 			savedFile = await this.saveRecording(result);
+		}
+
+		if (result.durationMs > LONG_RECORDING_WARNING_MS) {
+			new Notice(
+				`This recording is over ${Math.round(LONG_RECORDING_WARNING_MS / (60 * 60 * 1000))} hours long. If it needs to be split for transcription, decoding it may use a lot of memory and could fail on this device.${
+					savedFile ? " The audio file is already saved, so it's safe either way." : ""
+				}`,
+				10000
+			);
 		}
 
 		const jobId = this.beginPipelineJob();

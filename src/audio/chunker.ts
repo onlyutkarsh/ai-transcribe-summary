@@ -31,6 +31,11 @@ export async function* chunkAtSilence(blob: Blob, targetChunkBytes = WHISPER_CHU
 	let buffer: AudioBuffer;
 	try {
 		buffer = await audioContext.decodeAudioData(await blob.arrayBuffer());
+	} catch (error) {
+		throw new Error(
+			"This recording is too large to upload but couldn't be split into smaller pieces (its audio format isn't supported for decoding). The original recording is still saved in your vault.",
+			{ cause: error }
+		);
 	} finally {
 		await audioContext.close();
 	}
@@ -45,7 +50,7 @@ export async function* chunkAtSilence(blob: Blob, targetChunkBytes = WHISPER_CHU
 }
 
 /** Picks silence-gap sample indices roughly every `targetChunkBytes` (measured in equivalent WAV size) worth of audio. */
-function findSilenceSplitPoints(buffer: AudioBuffer, targetChunkBytes: number): number[] {
+export function findSilenceSplitPoints(buffer: AudioBuffer, targetChunkBytes: number): number[] {
 	const bytesPerSample = 2 * buffer.numberOfChannels;
 	const targetChunkSamples = Math.floor(targetChunkBytes / bytesPerSample);
 	const windowSamples = Math.max(1, Math.floor(ANALYSIS_WINDOW_SECONDS * buffer.sampleRate));

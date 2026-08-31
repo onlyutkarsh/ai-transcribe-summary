@@ -1,6 +1,6 @@
 import { RequestUrlResponse, requestUrl } from "obsidian";
 import { chunkAtSilence, needsChunking } from "../audio/chunker";
-import { logDebug } from "../pipeline";
+import { logDebug } from "../log";
 import { encodeMultipartFormData } from "./multipart";
 import { hasRepetitionLoop } from "./repetition-detector";
 import { TranscriptionProvider, TranscriptionProviderId, TranscriptionRequest, TranscriptionResult } from "./transcription";
@@ -14,6 +14,8 @@ export interface WhisperProviderConfig {
 
 const MAX_RETRIES = 3;
 const RETRY_BASE_DELAY_MS = 1000;
+/** Chunk uploads in flight at once - bounded rather than unbounded so memory (each chunk's encoded WAV bytes held until its request completes) and provider rate-limit exposure stay modest on meetings with many chunks. */
+const MAX_CONCURRENT_CHUNK_UPLOADS = 3;
 
 const PROVIDER_LABELS: Record<TranscriptionProviderId, string> = {
 	openai: "OpenAI",
@@ -41,32 +43,63 @@ export class WhisperTranscriptionProvider implements TranscriptionProvider {
 		const chunked = needsChunking(request.audio);
 		logDebug("whisper: audio size", request.audio.size, "bytes, chunking:", chunked);
 
-		// chunkAtSilence yields pieces one at a time rather than building the full array up
-		// front, so at most one encoded WAV chunk is resident in memory alongside the decoded
-		// PCM buffer - important for long recordings where holding every chunk simultaneously
-		// risks exhausting memory.
-		const pieces: AsyncIterable<{ data: ArrayBuffer; mimeType: string }> = chunked
-			? chunkAtSilence(request.audio)
-			: (async function* () {
-					yield { data: await request.audio.arrayBuffer(), mimeType: request.audio.type || request.mimeType };
-			  })();
-
-		const texts: string[] = [];
-		let index = 0;
-		for await (const piece of pieces) {
-			if (chunked) {
-				onProgress(`Transcribing chunk ${index + 1}`);
-			}
-			texts.push(await this.transcribeOnePiece(piece, request.vocabularyHints, index));
-			index++;
+		let texts: string[];
+		if (chunked) {
+			// chunkAtSilence yields pieces one at a time rather than building the full array up
+			// front, so at most MAX_CONCURRENT_CHUNK_UPLOADS encoded WAV chunks are resident in
+			// memory alongside the decoded PCM buffer, not every chunk in the recording at once.
+			texts = await this.transcribeChunksConcurrently(chunkAtSilence(request.audio), request.vocabularyHints, onProgress);
+		} else {
+			const piece = { data: await request.audio.arrayBuffer(), mimeType: request.audio.type || request.mimeType };
+			texts = [await this.transcribeOnePiece(piece, request.vocabularyHints, 0)];
 		}
 
-		logDebug("whisper: piece count", index);
+		logDebug("whisper: piece count", texts.length);
 
 		const text = texts.join(" ").trim();
 		const repetitionWarning = hasRepetitionLoop(text);
 		logDebug("whisper: transcription complete", { textLength: text.length, repetitionWarning });
 		return { text, repetitionWarning };
+	}
+
+	/**
+	 * Consumes `pieces` and uploads each one, at most MAX_CONCURRENT_CHUNK_UPLOADS in flight at
+	 * a time - a fixed-size worker pool rather than draining the generator into an array first
+	 * and firing everything at once, so at most a handful of chunks' encoded bytes are resident
+	 * simultaneously regardless of how many chunks the recording has. Results are returned in
+	 * original chunk order even though completion order may differ.
+	 */
+	private async transcribeChunksConcurrently(
+		pieces: AsyncIterable<{ data: ArrayBuffer; mimeType: string }>,
+		vocabularyHints: string,
+		onProgress: (status: string) => void
+	): Promise<string[]> {
+		const iterator = pieces[Symbol.asyncIterator]();
+		const results: string[] = [];
+		let nextIndex = 0;
+		let completedCount = 0;
+
+		// chunkAtSilence doesn't expose a chunk total up front (chunks are found lazily, one at
+		// a time), and workers upload concurrently, so completion order doesn't match chunk
+		// order either - "Transcribed N chunks so far" is the only accurate progress shape
+		// available without pre-draining the generator, which would defeat its memory-bounded
+		// point (see the comment at the call site).
+		const worker = async () => {
+			for (;;) {
+				const { value: piece, done } = await iterator.next();
+				if (done) return;
+
+				const index = nextIndex++;
+				results[index] = await this.transcribeOnePiece(piece, vocabularyHints, index);
+				completedCount++;
+				onProgress(`Transcribed ${completedCount} chunk${completedCount === 1 ? "" : "s"} so far`);
+			}
+		};
+
+		const workers = Array.from({ length: MAX_CONCURRENT_CHUNK_UPLOADS }, () => worker());
+		await Promise.all(workers);
+
+		return results;
 	}
 
 	private async transcribeOnePiece(piece: { data: ArrayBuffer; mimeType: string }, vocabularyHints: string, index: number): Promise<string> {

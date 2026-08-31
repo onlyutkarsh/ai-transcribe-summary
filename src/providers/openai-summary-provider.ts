@@ -1,5 +1,5 @@
 import { requestUrl } from "obsidian";
-import { logDebug } from "../pipeline";
+import { logDebug } from "../log";
 import type { SummaryProviderId } from "../settings";
 import { SummaryProvider, SummaryRequest, SummaryResult } from "./summary";
 
