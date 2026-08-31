@@ -49,20 +49,32 @@ export function validatePipelineConfig(settings: AiTranscribeSummarySettings): s
 /**
  * Runs audio -> transcript -> (optionally) summary and writes the output.
  * Shared by the live-recording stop handler and the right-click "Transcribe
- * & summarize" retry action - the only difference between the two call sites
- * is where the output lands, handled by `insertIntoActiveNote`. When
- * settings.generateSummary is off, stops after transcription: the transcript
- * is saved as its own note, no LLM call is made.
+ * & summarize" retry action; both pass the markdown note the user was last
+ * editing (if any) via `options.targetView`, so the result lands at the
+ * cursor there, falling back to a new note in the summary folder when
+ * `targetView` is undefined (nothing was ever open). The caller must resolve
+ * this itself from a live-updated cache rather than a workspace lookup taken
+ * at call time - opening the right-click context menu moves the active leaf
+ * to the file explorer before the click handler runs, so a lookup done here
+ * (e.g. `workspace.activeEditor`/`getActiveViewOfType`) would already be too
+ * late even though a note is still open on screen. When settings.generateSummary
+ * is off, stops after transcription: the transcript is always saved as its own
+ * note in the transcript folder, no LLM call is made, and targetView has no effect.
  */
 export async function runTranscribeAndSummarizePipeline(
 	app: App,
 	settings: AiTranscribeSummarySettings,
 	source: AudioSource,
-	options: { insertIntoActiveNote: boolean; onProgress?: ProgressCallback }
+	options: { targetView: MarkdownView | undefined; onProgress?: ProgressCallback }
 ): Promise<void> {
 	const onProgress = options.onProgress ?? (() => {});
 
-	logDebug("pipeline started", { baseName: source.baseName, mimeType: source.mimeType, sizeBytes: source.blob.size, insertIntoActiveNote: options.insertIntoActiveNote });
+	logDebug("pipeline started", {
+		baseName: source.baseName,
+		mimeType: source.mimeType,
+		sizeBytes: source.blob.size,
+		targetViewFile: options.targetView?.file?.path ?? null,
+	});
 
 	const configError = validatePipelineConfig(settings);
 	if (configError) {
@@ -73,7 +85,10 @@ export async function runTranscribeAndSummarizePipeline(
 	// Captured up front, not after the transcription/summary calls - the user may switch notes
 	// while those are in flight, and the result should land in the note that was active when
 	// recording stopped, not whatever happens to be active when the LLM calls finish.
-	const activeView = options.insertIntoActiveNote ? app.workspace.getActiveViewOfType(MarkdownView) : null;
+	// targetView comes from a cache in main.ts that can outlive the note it points to (closed
+	// tab, deleted file) - confirm its leaf is still open before trusting it as an insert target.
+	const targetLeafStillOpen = options.targetView && app.workspace.getLeavesOfType("markdown").some((leaf) => leaf.view === options.targetView);
+	const activeView = targetLeafStillOpen ? options.targetView : undefined;
 
 	const transcriptionProvider = createTranscriptionProvider(settings);
 	logDebug("transcription provider resolved", transcriptionProvider.id);
@@ -141,7 +156,7 @@ export async function runTranscribeAndSummarizePipeline(
 
 		onProgress("Saving results");
 		if (activeView) {
-			await writeIntoActiveNote(activeView, settings, summaryMarkdown, transcriptMarkdown, source.audioFile);
+			await writeIntoActiveNote(activeView, settings, source.baseName, summaryMarkdown, transcriptMarkdown, source.audioFile);
 		} else {
 			await writeIntoNewNote(app, settings, source.baseName, summaryMarkdown, transcriptMarkdown, source.audioFile);
 		}
@@ -204,6 +219,7 @@ function buildAudioLinkMarkdown(app: App, audioFile: TFile, sourcePath: string):
 async function writeIntoActiveNote(
 	view: MarkdownView,
 	settings: AiTranscribeSummarySettings,
+	baseName: string,
 	summaryMarkdown: string,
 	transcriptMarkdown: string,
 	audioFile: TFile | undefined
@@ -213,7 +229,7 @@ async function writeIntoActiveNote(
 	editor.replaceSelection(insertion);
 
 	if (settings.transcriptPlacement === "dedicated-file") {
-		await writeTranscriptFile(view.app, settings, view.file?.basename ?? "meeting", transcriptMarkdown, audioFile);
+		await writeTranscriptFile(view.app, settings, baseName, transcriptMarkdown, audioFile);
 	}
 }
 

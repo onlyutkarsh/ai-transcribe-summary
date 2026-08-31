@@ -1,6 +1,6 @@
 import { requestUrl } from "obsidian";
 import { logDebug } from "../log";
-import type { SummaryProviderId } from "../settings";
+import { SUMMARY_PROVIDER_SCHEMA, type SummaryProviderId } from "../settings";
 import { SummaryProvider, SummaryRequest, SummaryResult } from "./summary";
 
 export interface OpenAiSummaryProviderConfig {
@@ -16,13 +16,13 @@ interface ChatCompletionsResponseBody {
 	choices?: { message?: { content?: string } }[];
 }
 
-/** Backs both "openai" and "openrouter" - OpenRouter exposes the same Chat Completions request/response shape. */
+/** Backs "openai", "openrouter", and "gemini" - all three expose the same Chat Completions request/response shape (Gemini via its OpenAI-compatible endpoint). */
 export class OpenAiSummaryProvider implements SummaryProvider {
 	constructor(readonly id: SummaryProviderId, private config: OpenAiSummaryProviderConfig) {}
 
 	async summarize(request: SummaryRequest): Promise<SummaryResult> {
 		if (!this.config.apiKey) {
-			throw new Error(`${this.id === "openrouter" ? "OpenRouter" : "OpenAI"} API key is not set. Add it in Settings under Summary generation.`);
+			throw new Error(`${SUMMARY_PROVIDER_SCHEMA[this.id].label} API key is not set. Add it in Settings under Summary generation.`);
 		}
 
 		const url = `${this.config.baseUrl.replace(/\/$/, "")}/chat/completions`;

@@ -1,4 +1,4 @@
-import { App, Menu, Modal, normalizePath, Notice, Plugin, Setting, TAbstractFile, TFile, TFolder } from "obsidian";
+import { App, MarkdownView, Menu, Modal, normalizePath, Notice, Plugin, Setting, TAbstractFile, TFile, TFolder } from "obsidian";
 import { AudioRecorder, RecordingResult } from "./audio/recorder";
 import { formatTimestampForFilename, isAudioFile, runTranscribeAndSummarizePipeline } from "./pipeline";
 import { AiTranscribeSummarySettingTab, AiTranscribeSummarySettings, DEFAULT_SETTINGS } from "./settings";
@@ -94,6 +94,16 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 	private ribbonIconEl!: HTMLElement;
 	private recorder = new AudioRecorder();
 
+	/**
+	 * Last markdown note the user was actually editing, updated live via
+	 * "active-leaf-change". Reading `workspace.activeEditor`/`getActiveViewOfType`
+	 * at click time doesn't work for the right-click "Transcribe & summarize" menu
+	 * item: opening the context menu itself moves the active leaf to the file
+	 * explorer before our click handler runs, so live lookups return null even
+	 * though a note is still open on screen. This cache survives that.
+	 */
+	private lastMarkdownView: MarkdownView | undefined;
+
 	/** One entry per in-flight pipeline job (a right-click "Transcribe & summarize", or the post-recording pipeline), keyed by a locally-unique id - so one job finishing doesn't stop/hide the shared status bar spinner while others are still running. */
 	private activePipelineJobs = new Map<number, string>();
 	private nextPipelineJobId = 0;
@@ -159,6 +169,15 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 		this.addSettingTab(new AiTranscribeSummarySettingTab(this.app, this));
 
 		this.registerEvent(this.app.workspace.on("file-menu", (menu, file) => this.onFileMenu(menu, file)));
+
+		this.lastMarkdownView = this.app.workspace.getActiveViewOfType(MarkdownView) ?? undefined;
+		this.registerEvent(
+			this.app.workspace.on("active-leaf-change", (leaf) => {
+				if (leaf?.view instanceof MarkdownView) {
+					this.lastMarkdownView = leaf.view;
+				}
+			})
+		);
 	}
 
 	private onFileMenu(menu: Menu, file: TAbstractFile) {
@@ -180,7 +199,7 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 				this.app,
 				this.settings,
 				{ blob, mimeType: blob.type, baseName: file.basename, audioFile: file },
-				{ insertIntoActiveNote: false, onProgress: (status) => this.showPipelineProgress(jobId, status) }
+				{ targetView: this.lastMarkdownView, onProgress: (status) => this.showPipelineProgress(jobId, status) }
 			);
 		} catch (error) {
 			console.error("ai-transcribe-summary: transcribe & summarize failed", error);
@@ -372,7 +391,7 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 				this.app,
 				this.settings,
 				{ blob: result.blob, mimeType: result.mimeType, baseName: savedFile?.basename ?? `meeting ${formatTimestampForFilename(new Date())}`, audioFile: savedFile },
-				{ insertIntoActiveNote: true, onProgress: (status) => this.showPipelineProgress(jobId, status) }
+				{ targetView: this.lastMarkdownView, onProgress: (status) => this.showPipelineProgress(jobId, status) }
 			);
 		} catch (error) {
 			console.error("ai-transcribe-summary: transcribe & summarize failed", error);
@@ -468,6 +487,7 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 			summaryProviders: {
 				openai: { ...DEFAULT_SETTINGS.summaryProviders.openai, ...saved.summaryProviders?.openai },
 				openrouter: { ...DEFAULT_SETTINGS.summaryProviders.openrouter, ...saved.summaryProviders?.openrouter },
+				gemini: { ...DEFAULT_SETTINGS.summaryProviders.gemini, ...saved.summaryProviders?.gemini },
 			},
 		};
 	}

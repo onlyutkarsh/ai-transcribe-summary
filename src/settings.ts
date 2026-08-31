@@ -20,6 +20,8 @@ function makeSecret(text: TextComponent): TextComponent {
 
 export const OPENAI_BASE_URL = "https://api.openai.com/v1";
 export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
+/** Gemini's OpenAI-compatible endpoint - lets GeminiSummaryProvider reuse the same Chat Completions request/response shape as OpenAI/OpenRouter. */
+export const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai";
 
 export const DEFAULT_SUMMARY_PROMPT = `You are summarizing a meeting transcript. Produce a structured, Teams-Copilot-style summary with these sections, in this order:
 
@@ -91,11 +93,12 @@ export function transcriptionKeyReuseTarget(settings: AiTranscribeSummarySetting
 	return settings.transcriptionProvider;
 }
 
-export type SummaryProviderId = "openai" | "openrouter";
+export type SummaryProviderId = "openai" | "openrouter" | "gemini";
 
 export interface SummaryProviderSettingsMap {
 	openai: { apiKey: string; model: string; baseUrl: string; temperature: number };
 	openrouter: { apiKey: string; model: string; baseUrl: string; temperature: number };
+	gemini: { apiKey: string; model: string; baseUrl: string; temperature: number };
 }
 
 /** Lower than the API default (usually 1.0) - summarization should stay close to the transcript, not get creative. */
@@ -138,8 +141,8 @@ export interface AiTranscribeSummarySettings {
 	transcriptFolder: string;
 
 	// Output: summary. Inserted at the cursor in the active note when one is
-	// open (live recording); written into summaryFolder otherwise (no active
-	// note, or a right-click retry, which never has an active-note context).
+	// open (live recording, or a right-click retry with a markdown note still
+	// open); written into summaryFolder otherwise (no active note).
 	summaryFolder: string;
 }
 
@@ -162,6 +165,7 @@ export const DEFAULT_SETTINGS: AiTranscribeSummarySettings = {
 	summaryProviders: {
 		openai: { apiKey: "", model: "gpt-4o-mini", baseUrl: OPENAI_BASE_URL, temperature: DEFAULT_SUMMARY_TEMPERATURE },
 		openrouter: { apiKey: "", model: "openai/gpt-4o-mini", baseUrl: OPENROUTER_BASE_URL, temperature: DEFAULT_SUMMARY_TEMPERATURE },
+		gemini: { apiKey: "", model: "gemini-2.0-flash", baseUrl: GEMINI_BASE_URL, temperature: DEFAULT_SUMMARY_TEMPERATURE },
 	},
 	summaryPrompt: DEFAULT_SUMMARY_PROMPT,
 	generateSummary: true,
@@ -228,7 +232,7 @@ interface SummaryProviderSchemaEntry {
 }
 
 /** One entry per summary-generation provider - both share the same (apiKey, model, baseUrl, temperature) shape. */
-const SUMMARY_PROVIDER_SCHEMA: Record<SummaryProviderId, SummaryProviderSchemaEntry> = {
+export const SUMMARY_PROVIDER_SCHEMA: Record<SummaryProviderId, SummaryProviderSchemaEntry> = {
 	openai: {
 		label: "OpenAI",
 		description: "Uses the OpenAI Chat Completions API directly.",
@@ -247,9 +251,20 @@ const SUMMARY_PROVIDER_SCHEMA: Record<SummaryProviderId, SummaryProviderSchemaEn
 			el.appendText(".");
 		}),
 	},
+	gemini: {
+		label: "Google Gemini",
+		description: "Uses Google's Gemini API directly, via its OpenAI-compatible endpoint.",
+		apiKeyPlaceholder: "AIza...",
+		modelPlaceholder: "gemini-2.0-flash",
+		modelDesc: createFragment((el) => {
+			el.appendText("Gemini model used to generate the structured summary from the transcript. See available models on ");
+			el.createEl("a", { text: "Google AI Studio", href: "https://aistudio.google.com/apikey" });
+			el.appendText(".");
+		}),
+	},
 };
 
-const SUMMARY_PROVIDER_ORDER: SummaryProviderId[] = ["openai", "openrouter"];
+const SUMMARY_PROVIDER_ORDER: SummaryProviderId[] = ["openai", "openrouter", "gemini"];
 
 const PROVIDER_ORDER: TranscriptionProviderId[] = ["openrouter", "openai"];
 
@@ -316,6 +331,12 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 				return settings.summaryProviders.openrouter.temperature;
 			case "summaryProviders.openrouter.baseUrl":
 				return settings.summaryProviders.openrouter.baseUrl;
+			case "summaryProviders.gemini.model":
+				return settings.summaryProviders.gemini.model;
+			case "summaryProviders.gemini.temperature":
+				return settings.summaryProviders.gemini.temperature;
+			case "summaryProviders.gemini.baseUrl":
+				return settings.summaryProviders.gemini.baseUrl;
 			case "summaryPrompt":
 				return settings.summaryPrompt;
 			case "vocabularyHints":
@@ -345,6 +366,12 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 			default:
 				return undefined;
 		}
+	}
+
+	/** Parses and range-checks a summary-provider temperature; returns undefined (reject) when invalid. */
+	private static parseTemperature(value: unknown): number | undefined {
+		const temperature = Number(value);
+		return Number.isFinite(temperature) && temperature >= 0 && temperature <= 2 ? temperature : undefined;
 	}
 
 	/** Always explicit, always calls saveSettings() itself - never relies on any assumed default write path. */
@@ -378,20 +405,38 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 			case "summaryProviders.openai.model":
 				settings.summaryProviders.openai.model = (value as string) || SUMMARY_PROVIDER_SCHEMA.openai.modelPlaceholder;
 				break;
-			case "summaryProviders.openai.temperature":
-				settings.summaryProviders.openai.temperature = value as number;
+			case "summaryProviders.openai.temperature": {
+				const temperature = AiTranscribeSummarySettingTab.parseTemperature(value);
+				if (temperature === undefined) return;
+				settings.summaryProviders.openai.temperature = temperature;
 				break;
+			}
 			case "summaryProviders.openai.baseUrl":
 				settings.summaryProviders.openai.baseUrl = (value as string) || DEFAULT_SETTINGS.summaryProviders.openai.baseUrl;
 				break;
 			case "summaryProviders.openrouter.model":
 				settings.summaryProviders.openrouter.model = (value as string) || SUMMARY_PROVIDER_SCHEMA.openrouter.modelPlaceholder;
 				break;
-			case "summaryProviders.openrouter.temperature":
-				settings.summaryProviders.openrouter.temperature = value as number;
+			case "summaryProviders.openrouter.temperature": {
+				const temperature = AiTranscribeSummarySettingTab.parseTemperature(value);
+				if (temperature === undefined) return;
+				settings.summaryProviders.openrouter.temperature = temperature;
 				break;
+			}
 			case "summaryProviders.openrouter.baseUrl":
 				settings.summaryProviders.openrouter.baseUrl = (value as string) || DEFAULT_SETTINGS.summaryProviders.openrouter.baseUrl;
+				break;
+			case "summaryProviders.gemini.model":
+				settings.summaryProviders.gemini.model = (value as string) || SUMMARY_PROVIDER_SCHEMA.gemini.modelPlaceholder;
+				break;
+			case "summaryProviders.gemini.temperature": {
+				const temperature = AiTranscribeSummarySettingTab.parseTemperature(value);
+				if (temperature === undefined) return;
+				settings.summaryProviders.gemini.temperature = temperature;
+				break;
+			}
+			case "summaryProviders.gemini.baseUrl":
+				settings.summaryProviders.gemini.baseUrl = (value as string) || DEFAULT_SETTINGS.summaryProviders.gemini.baseUrl;
 				break;
 			case "summaryPrompt":
 				settings.summaryPrompt = (value as string) || DEFAULT_SUMMARY_PROMPT;
@@ -462,6 +507,7 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 				{
 					name: "Transcript placement",
 					desc: "Where the full raw transcript is written, relative to the summary. 'Same note' means whichever note the summary actually lands in - the active note if one was open, or the new note created in the summary folder otherwise.",
+					visible: () => this.plugin.settings.generateSummary,
 					control: {
 						type: "dropdown",
 						key: "transcriptPlacement",
@@ -473,8 +519,8 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 				},
 				{
 					name: "Transcript folder",
-					desc: "Vault folder used when transcript placement is 'Dedicated file'.",
-					visible: () => this.plugin.settings.transcriptPlacement === "dedicated-file",
+					desc: "Vault folder used when transcript placement is 'Dedicated file', or always when summary generation is off (the transcript then always gets its own note here, since there's no summary for it to accompany).",
+					visible: () => this.plugin.settings.transcriptPlacement === "dedicated-file" || !this.plugin.settings.generateSummary,
 					control: {
 						type: "folder",
 						key: "transcriptFolder",
@@ -558,13 +604,14 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 				},
 				...this.buildSummaryProviderFields("openai"),
 				...this.buildSummaryProviderFields("openrouter"),
+				...this.buildSummaryProviderFields("gemini"),
 				{
 					name: "Summary prompt",
 					desc: "Instructions sent to the LLM to turn a transcript into a structured summary (Overview, Topics Discussed, Decisions Made, Action Items, Open Questions). Customize the wording, but keep it from inventing names/owners/dates not present in the transcript.",
 					visible: () => this.plugin.settings.generateSummary,
 					render: (setting) => {
+						this.summaryPromptTextArea = undefined; // Clear stale reference before creating new one
 						setting.setClass("ai-transcribe-summary-prompt-setting");
-						this.summaryPromptTextArea = undefined;
 						setting.addTextArea((text) => {
 							this.summaryPromptTextArea = text;
 							text
@@ -609,8 +656,8 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 					desc: "Instructions sent to the LLM to clean up the raw transcript. Customize the wording, but keep it from summarizing, shortening, or inventing content.",
 					visible: () => this.plugin.settings.cleanupTranscript,
 					render: (setting) => {
+						this.cleanupPromptTextArea = undefined; // Clear stale reference before creating new one
 						setting.setClass("ai-transcribe-summary-prompt-setting");
-						this.cleanupPromptTextArea = undefined;
 						setting.addTextArea((text) => {
 							this.cleanupPromptTextArea = text;
 							text
@@ -647,7 +694,7 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 				},
 				{
 					name: "Summary folder",
-					desc: "Where the summary is written when there's no active note to insert it into at the cursor (nothing open, or a right-click 'Transcribe & summarize' retry, which always writes here using the audio filename). If transcript placement above is 'Same note', the transcript follows the summary into this new note too.",
+					desc: "Where the summary is written when there's no active note to insert it into at the cursor - nothing open, or a right-click 'Transcribe & summarize' retry run without a note focused (the new note uses the audio filename). If transcript placement above is 'Same note', the transcript follows the summary into this new note too. Not used when summary generation is off - the transcript then always goes to the transcript folder below instead.",
 					control: {
 						type: "folder",
 						key: "summaryFolder",
@@ -661,14 +708,15 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 
 	private buildSummaryProviderFields(providerId: SummaryProviderId): SettingGroupItem[] {
 		const schema = SUMMARY_PROVIDER_SCHEMA[providerId];
-		const reuseHostLabel = providerId === "openai" ? "OpenAI" : "OpenRouter";
+		const reuseHostLabel = PROVIDER_SETTINGS_SCHEMA[transcriptionKeyReuseTarget(this.plugin.settings)].label;
 		const groupVisible = () => this.plugin.settings.generateSummary && this.plugin.settings.summaryProvider === providerId;
 
 		return [
 			{
 				name: `Reuse transcription (${reuseHostLabel}) API key`,
 				desc: `Transcription is currently configured to call ${reuseHostLabel} - reuse that same key for summary generation instead of a separate key here.`,
-				visible: () => groupVisible() && transcriptionKeyReuseTarget(this.plugin.settings) === providerId,
+				// Gemini isn't a transcription provider, so reuse never applies to it.
+				visible: () => providerId !== "gemini" && groupVisible() && transcriptionKeyReuseTarget(this.plugin.settings) === providerId,
 				control: { type: "toggle", key: "reuseWhisperKeyForSummary" },
 			},
 			{
@@ -720,7 +768,7 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 				control: {
 					type: "text",
 					key: `summaryProviders.${providerId}.baseUrl`,
-					placeholder: providerId === "openai" ? OPENAI_BASE_URL : OPENROUTER_BASE_URL,
+					placeholder: providerId === "openai" ? OPENAI_BASE_URL : providerId === "openrouter" ? OPENROUTER_BASE_URL : GEMINI_BASE_URL,
 				},
 			},
 		];

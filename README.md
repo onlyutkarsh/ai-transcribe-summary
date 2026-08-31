@@ -31,7 +31,7 @@ This plugin is built around avoiding those failure modes specifically:
 - **In-app recording** - start, pause/resume, and stop meeting recordings from a ribbon icon, command palette, or hotkey.
 - **Right-click retry** - any `.webm`, `.mp3`, `.wav`, or `.m4a` file in your vault gets a "Transcribe & summarize" context menu item, so you can (re-)process audio you already have.
 - **Choice of transcription provider** - Whisper via OpenAI or OpenRouter.
-- **Choice of summary provider** - OpenAI or OpenRouter (OpenRouter also gives access to Anthropic and Google models under one key).
+- **Choice of summary provider** - OpenAI, Google Gemini, or OpenRouter (OpenRouter also gives access to Anthropic and other Google models under one key).
 - **Optional transcript cleanup pass** - an LLM pass that removes filler words, false starts, and grammar mistakes before the transcript is saved or summarized, without changing its meaning.
 - **Custom vocabulary hints** - feed the transcription provider a list of names, jargon, or project terms to reduce misrecognition.
 - **Configurable output layout** - summary at your cursor or in a new note, transcript in the same note or a dedicated file, each in its own configurable vault folder.
@@ -42,9 +42,36 @@ This plugin is built around avoiding those failure modes specifically:
 1. Install the plugin (see below) and enable it in Obsidian's Community Plugins settings.
 2. Open **Settings → AI Transcribe and Summary** and add an API key for your chosen transcription provider (Whisper/OpenRouter is the default) and summary provider.
 3. Click the microphone icon in the ribbon, or run **AI Transcribe and Summary: Start recording** from the command palette.
-4. When you're done, stop the recording. The audio is saved, transcribed, and summarized automatically - the summary lands at your cursor if you have a note open, or in a new note otherwise.
+4. When you're done, stop the recording. The audio is saved and transcribed automatically; if summary generation is enabled, the summary lands at your cursor if you have a note open, or in a new note otherwise.
 
 To process an audio file you already have in your vault, right-click it and choose **Transcribe & summarize**.
+
+### Getting an API key
+
+You need a key for at least one transcription provider (OpenAI or OpenRouter) and, if you want summaries, one summary provider (OpenAI, OpenRouter, or Gemini). The same OpenAI or OpenRouter key can be reused for both transcription and summary generation via the "Reuse transcription API key" toggle.
+
+**OpenAI:**
+
+1. Go to the [OpenAI API keys page](https://platform.openai.com/api-keys) and sign in.
+2. Click **Create new secret key**, name it, and copy the value (you won't be able to see it again).
+3. You'll need billing set up on the account - Whisper and Chat Completions are pay-as-you-go, not covered by ChatGPT subscriptions.
+4. In Obsidian, open **Settings → AI Transcribe and Summary**, pick **OpenAI** as the transcription and/or summary provider, and paste the key into the API key field.
+
+**OpenRouter:**
+
+1. Go to [OpenRouter's Keys page](https://openrouter.ai/keys) and sign in.
+2. Click **Create Key**, name it, and copy the value.
+3. Add credit to your account (OpenRouter is pay-as-you-go); some models have free tiers with tighter rate limits.
+4. In Obsidian, set the transcription and/or summary provider to **OpenRouter** and paste the key in. For the model field, use a provider-prefixed model id (e.g. `openai/whisper-1`, `openai/gpt-4o-mini`) - browse ids on [OpenRouter's model page](https://openrouter.ai/models).
+
+**Google Gemini** (summary provider only - transcription still goes through OpenAI or OpenRouter's Whisper):
+
+1. Go to [Google AI Studio](https://aistudio.google.com/apikey) and sign in with a Google account.
+2. Click **Create API key**, and choose or create a Google Cloud project when prompted.
+3. Copy the generated key.
+4. In Obsidian, set the summary provider to **Google Gemini** and paste the key into the API key field.
+
+All three providers meter usage per request; check their pricing/quota pages ([OpenAI](https://openai.com/api/pricing/), [OpenRouter](https://openrouter.ai/models), [Gemini](https://ai.google.dev/gemini-api/docs/pricing)) if you hit rate limits or unexpected charges.
 
 ### Installation
 
@@ -67,6 +94,14 @@ To process an audio file you already have in your vault, right-click it and choo
 | Output | Where the raw audio, transcript, and summary are saved, and whether the transcript lives in the same note as the summary or a dedicated file |
 
 Every prompt (summary and cleanup) is fully editable, with a one-click reset back to the default.
+
+## Security & privacy
+
+- **Audio and transcripts leave your device only for processing.** Recorded audio is sent to your chosen transcription provider (OpenAI or OpenRouter's Whisper endpoint) over HTTPS. If summary generation or transcript cleanup is enabled, the transcript text is sent to your chosen summary provider (OpenAI, Google Gemini, or OpenRouter) over HTTPS. No other data leaves your vault, and there is no telemetry.
+- **API keys are stored locally**, in your vault's `.obsidian/plugins/ai-transcribe-summary/data.json`, alongside your other plugin settings. They're never sent anywhere except as the `Authorization` header on requests to the provider you configured. If you sync or back up your vault, treat that file like any other secret - exclude it (e.g. via `.gitignore`) if your vault is versioned or shared.
+- **Retention is governed by your provider**, not this plugin. Check OpenAI's, Google's, or OpenRouter's own data-retention and training-use policies if that matters for your use case - they differ by provider and by account/API tier.
+- **Get consent before recording other people.** Recording meetings, calls, or conversations without the knowledge of other participants may be illegal depending on your jurisdiction, and audio is transmitted to a third-party API once recording stops.
+- **Everything else stays local.** Raw audio, transcripts, and summaries are written directly to your vault as regular files - this plugin doesn't run its own backend or store your content anywhere outside the providers you explicitly configure.
 
 ## Requirements
 
