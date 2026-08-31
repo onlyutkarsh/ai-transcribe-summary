@@ -45,7 +45,7 @@ export type TranscriptionProviderId = "openai" | "openrouter";
 
 export type TranscriptPlacement = "same-note" | "dedicated-file";
 
-/** Recording bitrate in kbps, per PRD Tier 2 ("32kbps default bitrate"). Kept as a closed set - MediaRecorder accepts arbitrary values, but only these are exposed. */
+/** Recording bitrate in kbps. Kept as a closed set - MediaRecorder accepts arbitrary values, but only these are exposed. */
 export type AudioBitrateKbps = 32 | 64 | 128;
 
 export const AUDIO_BITRATE_OPTIONS: { value: AudioBitrateKbps; label: string }[] = [
@@ -56,23 +56,11 @@ export const AUDIO_BITRATE_OPTIONS: { value: AudioBitrateKbps; label: string }[]
 
 export const OPENAI_DEFAULT_MODEL = "whisper-1";
 
-/** OpenRouter model ids are provider-prefixed (e.g. "openai/whisper-1"), unlike OpenAI's bare "whisper-1" - see OPENROUTER_MODELS_URL for where the exact id string is shown. */
+/** OpenRouter model ids are provider-prefixed (e.g. "openai/whisper-1"), unlike OpenAI's bare "whisper-1". */
 export const OPENROUTER_DEFAULT_MODEL = "openai/whisper-1";
 
-/**
- * OpenRouter's model list/collection pages only show display names, not the
- * id string to paste - that appears on each model's own page (header +
- * Quick Start code sample), which also links to similar models for
- * browsing. Points at the default model's page as a concrete example.
- */
 export const OPENROUTER_MODELS_URL = "https://openrouter.ai/openai/whisper-1";
 
-/**
- * Per-provider settings, keyed by TranscriptionProviderId. OpenAI and
- * OpenRouter are both Whisper-compatible hosts, exposed as separate
- * providers (each with its own key/model/base URL) rather than one
- * "Whisper" provider with a host picker, mirroring SummaryProviderSettingsMap.
- */
 export interface TranscriptionProviderSettingsMap {
 	openai: {
 		apiKey: string;
@@ -86,25 +74,13 @@ export interface TranscriptionProviderSettingsMap {
 	};
 }
 
-/**
- * Which transcription provider (if any) the given summary provider can reuse
- * the transcription API key from - "reuse transcription key" is only ever
- * valid when the summary provider is the same host the transcription
- * provider is already configured against.
- */
+/** The transcription provider whose key can be reused for summaries - only valid when the summary provider is the same host. */
 export function transcriptionKeyReuseTarget(settings: AiTranscribeSummarySettings): TranscriptionProviderId {
 	return settings.transcriptionProvider;
 }
 
 export type SummaryProviderId = "openai" | "openrouter";
 
-/**
- * Per-provider settings for summary generation, keyed by SummaryProviderId.
- * Mirrors TranscriptionProviderSettingsMap above - each LLM provider is an
- * interchangeable implementation with its own API key, default model, and
- * base URL, so adding one is a new key here plus a new SUMMARY_PROVIDER_SCHEMA
- * entry, not a scattering of top-level fields.
- */
 export interface SummaryProviderSettingsMap {
 	openai: { apiKey: string; model: string; baseUrl: string; temperature: number };
 	openrouter: { apiKey: string; model: string; baseUrl: string; temperature: number };
@@ -122,24 +98,12 @@ export interface AiTranscribeSummarySettings {
 	summaryProvider: SummaryProviderId;
 	summaryProviders: SummaryProviderSettingsMap;
 	summaryPrompt: string;
-	/** When off, the pipeline stops after transcription - transcript is saved, no LLM call is made and no summary note is created. */
+	/** When off, the pipeline stops after transcription - no LLM call, no summary note. */
 	generateSummary: boolean;
-	/**
-	 * Use the transcription provider's own apiKey for summary generation
-	 * instead of the selected summary provider's key. Only takes effect when
-	 * the selected summary provider matches the currently selected
-	 * transcriptionProvider (see transcriptionKeyReuseTarget) - e.g. if
-	 * transcriptionProvider is "openrouter", this only applies when
-	 * summaryProvider is also "openrouter", never "openai".
-	 */
+	/** Reuse the transcription provider's own apiKey for summaries instead of a separate key. Only applies when summaryProvider matches transcriptionProvider (see transcriptionKeyReuseTarget). */
 	reuseWhisperKeyForSummary: boolean;
 
-	/**
-	 * Optional LLM cleanup pass over the raw transcript (filler words, false
-	 * starts, grammar) before it's saved or fed into summary generation. Uses
-	 * the same provider/model/key already configured for summaryProvider - no
-	 * separate provider selection.
-	 */
+	/** Optional LLM cleanup pass over the raw transcript before it's saved/summarized. Uses the summaryProvider's key/model. */
 	cleanupTranscript: boolean;
 	cleanupPrompt: string;
 
@@ -218,11 +182,7 @@ interface ProviderSettingsSchema<K extends TranscriptionProviderId> {
 	render: (containerEl: HTMLElement, settings: TranscriptionProviderSettingsMap[K], onChange: () => Promise<void>) => void;
 }
 
-/**
- * One entry per TranscriptionProvider implementation. Adding a provider
- * means adding a key to TranscriptionProviderSettingsMap, a default above,
- * and one schema entry here - the settings tab itself stays unchanged.
- */
+/** One entry per TranscriptionProvider implementation. */
 const PROVIDER_SETTINGS_SCHEMA: {
 	[K in TranscriptionProviderId]: ProviderSettingsSchema<K>;
 } = {
@@ -331,11 +291,7 @@ interface SummaryProviderSchemaEntry {
 	modelPlaceholder: string;
 }
 
-/**
- * One entry per summary-generation provider. Both share the same
- * (apiKey, model, baseUrl) shape, so this is metadata for a single shared
- * render function rather than a per-provider render callback.
- */
+/** One entry per summary-generation provider - both share the same (apiKey, model, baseUrl) shape, rendered by a single shared function. */
 const SUMMARY_PROVIDER_SCHEMA: Record<SummaryProviderId, SummaryProviderSchemaEntry> = {
 	openai: {
 		label: "OpenAI",
@@ -418,17 +374,13 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 		PROVIDER_SETTINGS_SCHEMA[providerId].render(containerEl, this.plugin.settings.providers[providerId], onChange);
 	}
 
-	/** Renders API key / model / base URL for the active summary provider - same three fields for all four providers. */
 	private renderSummaryProviderFields<K extends SummaryProviderId>(containerEl: HTMLElement, providerId: K): void {
 		containerEl.empty();
 
 		const schema = SUMMARY_PROVIDER_SCHEMA[providerId];
 		const settings = this.plugin.settings.summaryProviders[providerId];
 
-		// The transcription provider's key can only be reused for the one
-		// summary provider matching it (see transcriptionKeyReuseTarget) - e.g.
-		// never offer it for "openai" while the transcription provider is set to
-		// "openrouter", since that key would be sent to the wrong host and fail.
+		// Reuse only applies when this provider matches the transcription provider - otherwise the key would go to the wrong host.
 		const reuseTarget = transcriptionKeyReuseTarget(this.plugin.settings);
 		if ((providerId === "openai" || providerId === "openrouter") && providerId === reuseTarget) {
 			const reuseHostLabel = reuseTarget === "openai" ? "OpenAI" : "OpenRouter";
@@ -606,12 +558,7 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 			});
 	}
 
-	/**
-	 * Microphone picker. Device labels are only populated by the browser once
-	 * microphone permission has been granted, so the dropdown starts with
-	 * whatever `enumerateDevices` currently returns and a refresh button
-	 * re-requests access (via `getUserMedia`) and re-enumerates.
-	 */
+	/** Device labels are only populated once mic permission is granted, so a refresh button re-requests access and re-enumerates. */
 	private renderMicrophoneSetting(containerEl: HTMLElement): void {
 		const setting = new Setting(containerEl)
 			.setName("Microphone")
@@ -636,9 +583,7 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 				})
 		);
 
-		// Requests permission up front: without it, most platforms return zero
-		// audioinput entries at all (not just blank-labeled ones), so the list
-		// would otherwise appear empty until the user finds the refresh button.
+		// Without permission most platforms return zero audioinput entries, so request it up front.
 		void this.populateMicrophoneOptions(dropdown, { requestPermission: true, silent: true });
 	}
 
