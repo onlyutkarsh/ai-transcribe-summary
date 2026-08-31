@@ -166,7 +166,7 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 		this.ribbonIconEl = this.addRibbonIcon("mic", "Start meeting recording", () => {
 			if (this.transitioning) return;
 			if (this.state === "idle") {
-				this.requestStartRecording();
+				this.requestStartRecording(true);
 			} else {
 				this.requestStopRecording(true);
 			}
@@ -178,7 +178,7 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 			name: "Start recording",
 			checkCallback: (checking) => {
 				if (this.state !== "idle" || this.transitioning) return false;
-				if (!checking) void this.startRecording();
+				if (!checking) this.requestStartRecording();
 				return true;
 			},
 		});
@@ -335,16 +335,20 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 		}
 	}
 
-	/** Always confirms before starting - used only by the ribbon icon, since dragging it to reorder can register as a click and silently start recording (see StartRecordingConfirmModal). */
-	private requestStartRecording() {
-		this.transitioning = true;
-		new StartRecordingConfirmModal(
-			this.app,
-			() => void this.startRecording(),
-			() => {
-				this.transitioning = false;
-			}
-		).open();
+	/** Ribbon icon clicks always confirm (forceConfirm) since dragging the ribbon icon to reorder it can register as a click; the command palette/hotkey path only confirms when the user has opted into confirmBeforeStartingRecording. */
+	private requestStartRecording(forceConfirm = false) {
+		if (forceConfirm || this.settings.confirmBeforeStartingRecording) {
+			this.transitioning = true;
+			new StartRecordingConfirmModal(
+				this.app,
+				() => void this.startRecording(),
+				() => {
+					this.transitioning = false;
+				}
+			).open();
+		} else {
+			void this.startRecording();
+		}
 	}
 
 	private togglePause() {

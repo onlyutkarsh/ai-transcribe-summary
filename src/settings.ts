@@ -65,6 +65,31 @@ export const AUDIO_BITRATE_OPTIONS: { value: AudioBitrateKbps; label: string }[]
 	{ value: 128, label: "128 kbps (best quality, ~4x file size)" },
 ];
 
+/** ISO-639-1 codes for Whisper's most commonly used languages, sorted by display name. Not exhaustive - Whisper supports ~100 languages - but covers the common case without risking a typo'd code silently degrading transcription quality. */
+export const TRANSCRIPTION_LANGUAGE_OPTIONS: { value: string; label: string }[] = [
+	{ value: "ar", label: "Arabic" },
+	{ value: "zh", label: "Chinese" },
+	{ value: "nl", label: "Dutch" },
+	{ value: "en", label: "English" },
+	{ value: "fi", label: "Finnish" },
+	{ value: "fr", label: "French" },
+	{ value: "de", label: "German" },
+	{ value: "hi", label: "Hindi" },
+	{ value: "id", label: "Indonesian" },
+	{ value: "it", label: "Italian" },
+	{ value: "ja", label: "Japanese" },
+	{ value: "ko", label: "Korean" },
+	{ value: "pl", label: "Polish" },
+	{ value: "pt", label: "Portuguese" },
+	{ value: "ru", label: "Russian" },
+	{ value: "es", label: "Spanish" },
+	{ value: "sv", label: "Swedish" },
+	{ value: "th", label: "Thai" },
+	{ value: "tr", label: "Turkish" },
+	{ value: "uk", label: "Ukrainian" },
+	{ value: "vi", label: "Vietnamese" },
+];
+
 export const OPENAI_DEFAULT_MODEL = "whisper-1";
 
 /** OpenRouter model ids are provider-prefixed (e.g. "openai/whisper-1"), unlike OpenAI's bare "whisper-1". */
@@ -125,11 +150,15 @@ export interface AiTranscribeSummarySettings {
 	// Custom vocabulary hints
 	vocabularyHints: string;
 
+	/** ISO-639-1 code (e.g. "en", "es"). Empty means let Whisper auto-detect the language. */
+	transcriptionLanguage: string;
+
 	// Recording behavior
 	microphoneDeviceId: string;
 	audioBitrateKbps: AudioBitrateKbps;
 	silenceAutoStopMinutes: number;
 	maxRecordingHours: number;
+	confirmBeforeStartingRecording: boolean;
 	confirmBeforeStoppingRecording: boolean;
 
 	// Output: raw audio
@@ -175,11 +204,13 @@ export const DEFAULT_SETTINGS: AiTranscribeSummarySettings = {
 	cleanupPrompt: DEFAULT_CLEANUP_PROMPT,
 
 	vocabularyHints: "",
+	transcriptionLanguage: "",
 
 	microphoneDeviceId: "",
 	audioBitrateKbps: 32,
 	silenceAutoStopMinutes: 5,
 	maxRecordingHours: 3,
+	confirmBeforeStartingRecording: false,
 	confirmBeforeStoppingRecording: false,
 
 	saveAudioFile: true,
@@ -311,6 +342,8 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 			this.buildSummaryGroup(),
 			this.buildVocabularyGroup(),
 			this.buildRecordingBehaviorGroup(),
+			this.buildInterfaceGroup(),
+			this.buildSupportGroup(),
 		];
 	}
 
@@ -358,12 +391,16 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 				return settings.summaryPrompt;
 			case "vocabularyHints":
 				return settings.vocabularyHints;
+			case "transcriptionLanguage":
+				return settings.transcriptionLanguage;
 			case "audioBitrateKbps":
 				return String(settings.audioBitrateKbps);
 			case "silenceAutoStopMinutes":
 				return settings.silenceAutoStopMinutes;
 			case "maxRecordingHours":
 				return settings.maxRecordingHours;
+			case "confirmBeforeStartingRecording":
+				return settings.confirmBeforeStartingRecording;
 			case "confirmBeforeStoppingRecording":
 				return settings.confirmBeforeStoppingRecording;
 			case "saveAudioFile":
@@ -463,6 +500,9 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 			case "vocabularyHints":
 				settings.vocabularyHints = value as string;
 				break;
+			case "transcriptionLanguage":
+				settings.transcriptionLanguage = value as string;
+				break;
 			case "audioBitrateKbps":
 				settings.audioBitrateKbps = Number(value) as AudioBitrateKbps;
 				break;
@@ -471,6 +511,9 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 				break;
 			case "maxRecordingHours":
 				settings.maxRecordingHours = value as number;
+				break;
+			case "confirmBeforeStartingRecording":
+				settings.confirmBeforeStartingRecording = value as boolean;
 				break;
 			case "confirmBeforeStoppingRecording":
 				settings.confirmBeforeStoppingRecording = value as boolean;
@@ -519,6 +562,18 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 						type: "dropdown",
 						key: "transcriptionProvider",
 						options: Object.fromEntries(PROVIDER_ORDER.map((id) => [id, PROVIDER_SETTINGS_SCHEMA[id].label])),
+					},
+				},
+				{
+					name: "Speaking language",
+					desc: "Language spoken in your recordings. The transcript is written in this language, not translated - setting this just improves accuracy and speed, especially for short or accented recordings. Leave on auto-detect if recordings mix languages or aren't in the list.",
+					control: {
+						type: "dropdown",
+						key: "transcriptionLanguage",
+						options: {
+							"": "Auto-detect",
+							...Object.fromEntries(TRANSCRIPTION_LANGUAGE_OPTIONS.map((option) => [option.value, option.label])),
+						},
 					},
 				},
 				...this.buildTranscriptionProviderFields("openai"),
@@ -901,10 +956,41 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 						validate: (value) => (Number.isFinite(value) && value > 0 ? undefined : "Must be greater than 0."),
 					},
 				},
+			],
+		};
+	}
+
+	private buildInterfaceGroup(): SettingDefinitionItem {
+		return {
+			type: "group",
+			heading: "Interface",
+			items: [
 				{
-					name: "Confirm before stopping",
-					desc: "Ask for confirmation before stopping an in-progress recording, to guard against an accidental click or hotkey press.",
+					name: "Confirm before starting (command/hotkey)",
+					desc: 'Ask for confirmation before starting a recording via the command palette or a hotkey, to guard against an accidental press. The ribbon icon always confirms separately, since dragging it to reorder can register as a click.',
+					control: { type: "toggle", key: "confirmBeforeStartingRecording" },
+				},
+				{
+					name: "Confirm before stopping (command/hotkey)",
+					desc: 'Ask for confirmation before stopping an in-progress recording via the command palette or a hotkey, to guard against an accidental press. The ribbon icon always confirms separately, since dragging it to reorder can register as a click.',
 					control: { type: "toggle", key: "confirmBeforeStoppingRecording" },
+				},
+			],
+		};
+	}
+
+	private buildSupportGroup(): SettingDefinitionItem {
+		return {
+			type: "group",
+			heading: "Support",
+			items: [
+				{
+					name: "Enjoying this plugin?",
+					desc: createFragment((el) => {
+						el.appendText("If it's saved you time, consider supporting development on ");
+						el.createEl("a", { text: "Ko-fi", href: "https://ko-fi.com/onlyutkarsh" });
+						el.appendText(".");
+					}),
 				},
 			],
 		};

@@ -47,7 +47,7 @@ describe("WhisperTranscriptionProvider concurrent chunk uploads", () => {
 		});
 
 		const provider = new WhisperTranscriptionProvider("openai", { apiKey: "key", baseUrl: "https://api.openai.com/v1", apiModel: "whisper-1" });
-		const resultPromise = provider.transcribe({ audio: fakeChunkedBlob(3), mimeType: "audio/webm", vocabularyHints: "" });
+		const resultPromise = provider.transcribe({ audio: fakeChunkedBlob(3), mimeType: "audio/webm", vocabularyHints: "", language: "" });
 
 		// Resolve out of order: chunk 2 first, then 0, then 1.
 		deferredByIndex[2].resolve();
@@ -75,7 +75,7 @@ describe("WhisperTranscriptionProvider concurrent chunk uploads", () => {
 		});
 
 		const provider = new WhisperTranscriptionProvider("openai", { apiKey: "key", baseUrl: "https://api.openai.com/v1", apiModel: "whisper-1" });
-		const resultPromise = provider.transcribe({ audio: fakeChunkedBlob(totalChunks), mimeType: "audio/webm", vocabularyHints: "" });
+		const resultPromise = provider.transcribe({ audio: fakeChunkedBlob(totalChunks), mimeType: "audio/webm", vocabularyHints: "", language: "" });
 
 		// Drain releases as they show up until every chunk has been processed.
 		let released = 0;

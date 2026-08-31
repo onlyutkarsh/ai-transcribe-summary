@@ -8,6 +8,8 @@ export interface TranscriptionRequest {
 	mimeType: string;
 	/** Comma-separated names/jargon from settings, passed through where the provider supports it. */
 	vocabularyHints: string;
+	/** ISO-639-1 code (e.g. "en"), or empty to let the provider auto-detect. */
+	language: string;
 	/** Called with a short status string as a provider makes progress (e.g. per-chunk upload progress). */
 	onProgress?: (status: string) => void;
 }

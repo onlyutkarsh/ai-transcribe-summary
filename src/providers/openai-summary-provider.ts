@@ -16,6 +16,15 @@ interface ChatCompletionsResponseBody {
 	choices?: { message?: { content?: string } }[];
 }
 
+/**
+ * Appended to every system prompt (default or user-customized, including the
+ * internal map-reduce digest prompt) so the LLM doesn't default to English
+ * for a non-English transcript - none of the prompts otherwise say what
+ * language to respond in, and an English-written prompt biases most models
+ * toward English output regardless of the input transcript's language.
+ */
+const LANGUAGE_MATCH_INSTRUCTION = "\n\nWrite your response in the same language as the transcript below, not the language of these instructions.";
+
 /** Backs "openai", "openrouter", and "gemini" - all three expose the same Chat Completions request/response shape (Gemini via its OpenAI-compatible endpoint). */
 export class OpenAiSummaryProvider implements SummaryProvider {
 	constructor(readonly id: SummaryProviderId, private config: OpenAiSummaryProviderConfig) {}
@@ -38,7 +47,7 @@ export class OpenAiSummaryProvider implements SummaryProvider {
 				model: this.config.model,
 				temperature: this.config.temperature,
 				messages: [
-					{ role: "system", content: request.prompt },
+					{ role: "system", content: request.prompt + LANGUAGE_MATCH_INSTRUCTION },
 					{ role: "user", content: request.transcript },
 				],
 			}),

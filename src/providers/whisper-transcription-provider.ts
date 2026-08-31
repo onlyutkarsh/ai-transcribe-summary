@@ -49,15 +49,17 @@ export class WhisperTranscriptionProvider implements TranscriptionProvider {
 		const chunked = needsChunking(request.audio);
 		logDebug("whisper: audio size", request.audio.size, "bytes, chunking:", chunked);
 
+		const options = { vocabularyHints: request.vocabularyHints, language: request.language };
+
 		let texts: string[];
 		if (chunked) {
 			// chunkAtSilence yields pieces one at a time rather than building the full array up
 			// front, so at most MAX_CONCURRENT_CHUNK_UPLOADS encoded WAV chunks are resident in
 			// memory alongside the decoded PCM buffer, not every chunk in the recording at once.
-			texts = await this.transcribeChunksConcurrently(chunkAtSilence(request.audio), request.vocabularyHints, onProgress);
+			texts = await this.transcribeChunksConcurrently(chunkAtSilence(request.audio), options, onProgress);
 		} else {
 			const piece = { data: await request.audio.arrayBuffer(), mimeType: request.audio.type || request.mimeType };
-			texts = [await this.transcribeOnePiece(piece, request.vocabularyHints, 0)];
+			texts = [await this.transcribeOnePiece(piece, options, 0)];
 		}
 
 		logDebug("whisper: piece count", texts.length);
@@ -77,7 +79,7 @@ export class WhisperTranscriptionProvider implements TranscriptionProvider {
 	 */
 	private async transcribeChunksConcurrently(
 		pieces: AsyncIterable<{ data: ArrayBuffer; mimeType: string }, void, unknown>,
-		vocabularyHints: string,
+		options: { vocabularyHints: string; language: string },
 		onProgress: (status: string) => void
 	): Promise<string[]> {
 		const iterator = pieces[Symbol.asyncIterator]();
@@ -96,7 +98,7 @@ export class WhisperTranscriptionProvider implements TranscriptionProvider {
 				if (done) return;
 
 				const index = nextIndex++;
-				results[index] = await this.transcribeOnePiece(piece, vocabularyHints, index);
+				results[index] = await this.transcribeOnePiece(piece, options, index);
 				completedCount++;
 				onProgress(`Transcribed ${completedCount} chunk${completedCount === 1 ? "" : "s"} so far`);
 			}
@@ -108,12 +110,13 @@ export class WhisperTranscriptionProvider implements TranscriptionProvider {
 		return results;
 	}
 
-	private async transcribeOnePiece(piece: { data: ArrayBuffer; mimeType: string }, vocabularyHints: string, index: number): Promise<string> {
+	private async transcribeOnePiece(piece: { data: ArrayBuffer; mimeType: string }, options: { vocabularyHints: string; language: string }, index: number): Promise<string> {
 		const extension = extensionForMimeType(piece.mimeType);
 		const { contentType, body } = encodeMultipartFormData(
 			[
 				{ name: "model", value: this.config.apiModel },
-				...(vocabularyHints ? [{ name: "prompt", value: vocabularyHints }] : []),
+				...(options.vocabularyHints ? [{ name: "prompt", value: options.vocabularyHints }] : []),
+				...(options.language ? [{ name: "language", value: options.language }] : []),
 			],
 			[{ name: "file", filename: `audio-${index}.${extension}`, mimeType: piece.mimeType, data: piece.data }]
 		);

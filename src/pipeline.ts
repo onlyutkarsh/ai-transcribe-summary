@@ -100,6 +100,7 @@ export async function runTranscribeAndSummarizePipeline(
 		audio: source.blob,
 		mimeType: source.mimeType,
 		vocabularyHints: settings.vocabularyHints,
+		language: settings.transcriptionLanguage,
 		onProgress,
 	});
 	logDebug("transcription finished", { durationMs: Date.now() - transcribeStartedAt, textLength: transcription.text.length, repetitionWarning: transcription.repetitionWarning });
