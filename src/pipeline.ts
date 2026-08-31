@@ -1,4 +1,4 @@
-import { App, MarkdownView, normalizePath, Notice, TFile, TFolder } from "obsidian";
+import { App, Editor, MarkdownView, normalizePath, Notice, TFile, TFolder } from "obsidian";
 import { logDebug } from "./log";
 import { createSummaryProvider, createTranscriptionProvider, resolveSummaryApiKey } from "./providers/factory";
 import { summarizeLongTranscript } from "./providers/map-reduce-summarizer";
@@ -35,17 +35,23 @@ export function validatePipelineConfig(settings: AiTranscribeSummarySettings): s
 	}
 
 	if (settings.generateSummary || settings.cleanupTranscript) {
-		const effectiveApiKey = resolveSummaryApiKey(settings, settings.summaryProvider);
-		if (!effectiveApiKey) {
-			const isReusingTranscriptionKey = settings.reuseWhisperKeyForSummary && transcriptionKeyReuseTarget(settings) === settings.summaryProvider;
-			const hint = isReusingTranscriptionKey
-				? '"Reuse transcription API key" is on but the transcription API key is also empty - set one of the two'
-				: `Add it in Settings under "Summary generation"`;
-			const feature = settings.generateSummary ? "Summary generation" : "Transcript cleanup";
-			return `${feature} is on but the ${settings.summaryProvider} API key is not set. ${hint}, or turn off "Generate summary after transcription"${settings.cleanupTranscript ? ' / "Clean up transcript"' : ""}.`;
-		}
+		const configError = validateSummaryProviderConfig(settings);
+		if (configError) return configError;
 	}
 
+	return undefined;
+}
+
+/** Same summary-provider API key check as validatePipelineConfig, but standalone - used by the text-summarization pipeline (note/selection), which never touches a transcription provider. */
+export function validateSummaryProviderConfig(settings: AiTranscribeSummarySettings): string | undefined {
+	const effectiveApiKey = resolveSummaryApiKey(settings, settings.summaryProvider);
+	if (!effectiveApiKey) {
+		const isReusingTranscriptionKey = settings.reuseWhisperKeyForSummary && transcriptionKeyReuseTarget(settings) === settings.summaryProvider;
+		const hint = isReusingTranscriptionKey
+			? '"Reuse transcription API key" is on but the transcription API key is also empty - set one of the two'
+			: `Add it in Settings under "Summary generation"`;
+		return `The ${settings.summaryProvider} API key is not set. ${hint}.`;
+	}
 	return undefined;
 }
 
@@ -120,6 +126,10 @@ export async function runTranscribeAndSummarizePipeline(
 	// transcript that already cost a real transcription API call to produce. Catch it, save the
 	// raw transcript immediately so that cost isn't wasted, and tell the user where it landed
 	// instead of just surfacing the underlying error.
+	// Tracks whether the dedicated-file transcript write below actually completed - the rescue
+	// path in the catch block uses this (rather than re-deriving it from settings) so it isn't
+	// skipped when a failure happens before that write runs, e.g. during cleanup.
+	let dedicatedTranscriptWritten = false;
 	try {
 		let transcriptText = transcription.text;
 		if (settings.cleanupTranscript) {
@@ -138,12 +148,25 @@ export async function runTranscribeAndSummarizePipeline(
 			transcriptText = cleanupResult.summary.trim() || transcriptText;
 		}
 
+		const transcriptMarkdown = buildTranscriptMarkdown(transcriptText);
+
 		if (!settings.generateSummary) {
 			onProgress("Saving transcript");
-			await writeTranscriptFile(app, settings, source.baseName, buildTranscriptMarkdown(transcriptText), source.audioFile);
+			await writeTranscriptFile(app, settings, source.baseName, transcriptMarkdown, source.audioFile);
 			new Notice(`Transcript ready for "${source.baseName}".`);
 			logDebug("pipeline finished (transcript only)");
 			return;
+		}
+
+		// Written up front, independent of the summary call below - it's already fully formed and
+		// paid for by the transcription request, so it shouldn't be held hostage by a summary call
+		// that might fail or be cancelled. Doing this here (rather than nested in
+		// writeIntoActiveNote/writeIntoNewNote) means the file appears as soon as it's ready instead
+		// of only after the summary succeeds.
+		if (settings.transcriptPlacement === "dedicated-file") {
+			onProgress("Saving transcript");
+			await writeTranscriptFile(app, settings, source.baseName, transcriptMarkdown, source.audioFile);
+			dedicatedTranscriptWritten = true;
 		}
 
 		const summaryProvider = createSummaryProvider(settings);
@@ -159,13 +182,12 @@ export async function runTranscribeAndSummarizePipeline(
 		// (where the summary lands) even when transcript placement is "dedicated-file" and the
 		// transcript itself goes to a separate file the user may not open right away.
 		const summaryMarkdown = `${audioLinkMarkdown}${buildSummaryMarkdown(summaryResult.summary, transcription.repetitionWarning)}`;
-		const transcriptMarkdown = buildTranscriptMarkdown(transcriptText);
 
 		onProgress("Saving results");
 		if (activeView) {
-			await writeIntoActiveNote(activeView, settings, source.baseName, summaryMarkdown, transcriptMarkdown, source.audioFile);
+			writeIntoActiveNote(activeView, settings, summaryMarkdown, transcriptMarkdown);
 		} else {
-			await writeIntoNewNote(app, settings, source.baseName, summaryMarkdown, transcriptMarkdown, source.audioFile);
+			await writeIntoNewNote(app, settings, source.baseName, summaryMarkdown, transcriptMarkdown);
 		}
 
 		new Notice(`Summary ready for "${source.baseName}".`);
@@ -173,7 +195,9 @@ export async function runTranscribeAndSummarizePipeline(
 	} catch (error) {
 		const cancelled = error instanceof RequestAbortedError;
 		logDebug(cancelled ? "pipeline cancelled after transcription, saving raw transcript" : "pipeline failed after transcription, saving raw transcript", error);
-		const rescuePath = await tryWriteRescueTranscript(app, settings, source, transcription.text);
+		// If the dedicated-file transcript was already written above before the failure, it's
+		// already safe - don't also write a rescue copy alongside it.
+		const rescuePath = dedicatedTranscriptWritten ? undefined : await tryWriteRescueTranscript(app, settings, source, transcription.text);
 
 		if (cancelled) {
 			throw new RequestAbortedError(
@@ -191,12 +215,71 @@ export async function runTranscribeAndSummarizePipeline(
 	}
 }
 
-/** Best-effort rescue save of the raw transcript after a post-transcription failure - swallows its own errors so a failure here doesn't replace the original, more useful error with an unrelated file-write one. */
+export interface TextSummarySource {
+	/** The note/selection text to summarize. */
+	text: string;
+	/** Editor to write the result into - full-note commands pass the whole editor and insert at the cursor; the "Summarize selection" command passes the same editor and replaces the current selection instead. */
+	editor: Editor;
+	/** True to replace the current selection with the summary; false to insert at the cursor (used for whole-note summarization, where there is no meaningful selection to replace). */
+	replaceSelection: boolean;
+	/** Note being summarized, if any - used only for progress/error messages. */
+	fileLabel: string;
+}
+
+/**
+ * Summarizes arbitrary note/selection text directly - unlike
+ * runTranscribeAndSummarizePipeline, there is no audio or transcription step:
+ * the input text goes straight to the configured summary provider (reusing
+ * the same summaryPrompt/model/map-reduce chunking as meeting summaries) and
+ * the result is written back into the same editor, either replacing the
+ * selection or inserted at the cursor.
+ */
+export async function runSummarizeTextPipeline(
+	settings: AiTranscribeSummarySettings,
+	source: TextSummarySource,
+	options: { onProgress?: ProgressCallback; signal?: AbortSignal }
+): Promise<void> {
+	const onProgress = options.onProgress ?? (() => {});
+	const signal = options.signal;
+
+	logDebug("text summary pipeline started", { fileLabel: source.fileLabel, textLength: source.text.length });
+
+	const configError = validateSummaryProviderConfig(settings);
+	if (configError) {
+		logDebug("config validation failed", configError);
+		throw new Error(configError);
+	}
+
+	if (!source.text.trim()) {
+		throw new Error("There's no text to summarize.");
+	}
+
+	const summaryProvider = createSummaryProvider(settings);
+	logDebug("summary provider resolved", summaryProvider.id);
+
+	onProgress("Generating summary");
+	new Notice(`Generating summary for "${source.fileLabel}"...`);
+	const summarizeStartedAt = Date.now();
+	const summaryResult = await summarizeLongTranscript(summaryProvider, { transcript: source.text, prompt: settings.summaryPrompt, signal }, onProgress);
+	logDebug("summary finished", { durationMs: Date.now() - summarizeStartedAt, summaryLength: summaryResult.summary.length });
+
+	const summaryMarkdown = buildSummaryMarkdown(summaryResult.summary, false);
+	if (source.replaceSelection) {
+		source.editor.replaceSelection(summaryMarkdown);
+	} else {
+		source.editor.replaceRange(summaryMarkdown, source.editor.getCursor());
+	}
+
+	new Notice(`Summary ready for "${source.fileLabel}".`);
+	logDebug("text summary pipeline finished");
+}
+
+/** Best-effort rescue save of the raw transcript after a post-transcription failure - swallows its own errors so a failure here doesn't replace the original, more useful error with an unrelated file-write one. Named "-raw" since it's always the uncleaned transcript text, whether or not cleanup was enabled - the failure may be cleanup itself failing. */
 async function tryWriteRescueTranscript(app: App, settings: AiTranscribeSummarySettings, source: AudioSource, transcriptText: string): Promise<string | undefined> {
 	try {
 		const folderPath = normalizePath(settings.transcriptFolder);
 		await ensureFolder(app, folderPath);
-		const rescuePath = resolveNonCollidingPath(app, folderPath, `${source.baseName} (rescued transcript)`);
+		const rescuePath = resolveNonCollidingPath(app, folderPath, `${source.baseName}-raw`);
 		const audioLinkMarkdown = source.audioFile ? buildAudioLinkMarkdown(app, source.audioFile, rescuePath) : "";
 		await app.vault.create(rescuePath, `${audioLinkMarkdown}${buildTranscriptMarkdown(transcriptText)}`);
 		return rescuePath;
@@ -231,48 +314,31 @@ function buildAudioLinkMarkdown(app: App, audioFile: TFile, sourcePath: string):
 	return `!${link}\n\n`;
 }
 
-async function writeIntoActiveNote(
-	view: MarkdownView,
-	settings: AiTranscribeSummarySettings,
-	baseName: string,
-	summaryMarkdown: string,
-	transcriptMarkdown: string,
-	audioFile: TFile | undefined
-): Promise<void> {
+function writeIntoActiveNote(view: MarkdownView, settings: AiTranscribeSummarySettings, summaryMarkdown: string, transcriptMarkdown: string): void {
 	const editor = view.editor;
 	const insertion = settings.transcriptPlacement === "same-note" ? `${summaryMarkdown}\n${transcriptMarkdown}` : summaryMarkdown;
 	editor.replaceSelection(insertion);
-
-	if (settings.transcriptPlacement === "dedicated-file") {
-		await writeTranscriptFile(view.app, settings, baseName, transcriptMarkdown, audioFile);
-	}
 }
 
-async function writeIntoNewNote(
-	app: App,
-	settings: AiTranscribeSummarySettings,
-	baseName: string,
-	summaryMarkdown: string,
-	transcriptMarkdown: string,
-	audioFile: TFile | undefined
-): Promise<void> {
+async function writeIntoNewNote(app: App, settings: AiTranscribeSummarySettings, baseName: string, summaryMarkdown: string, transcriptMarkdown: string): Promise<void> {
 	const folderPath = normalizePath(settings.summaryFolder);
 	await ensureFolder(app, folderPath);
 
 	const content = settings.transcriptPlacement === "same-note" ? `${summaryMarkdown}\n${transcriptMarkdown}` : summaryMarkdown;
 	const notePath = resolveNonCollidingPath(app, folderPath, baseName);
 	await app.vault.create(notePath, content);
-
-	if (settings.transcriptPlacement === "dedicated-file") {
-		await writeTranscriptFile(app, settings, baseName, transcriptMarkdown, audioFile);
-	}
 }
 
 /**
  * Writes the dedicated transcript file. When an audio file is known, prefixes
  * an embedded link to it (playable inline) - resolved against this file's own
  * path so the transcript stays self-contained and playable even when opened
- * on its own, without needing the summary note that links to it.
+ * on its own, without needing the summary note that links to it. Suffixed
+ * with "-transcript" so it doesn't collide with (or get confused for) the
+ * summary note when transcriptFolder and summaryFolder point at the same
+ * place - without this, both would resolve to the same "<baseName>.md" path
+ * and the collision fallback would silently timestamp-suffix whichever one
+ * is written second.
  */
 async function writeTranscriptFile(
 	app: App,
@@ -283,7 +349,7 @@ async function writeTranscriptFile(
 ): Promise<void> {
 	const folderPath = normalizePath(settings.transcriptFolder);
 	await ensureFolder(app, folderPath);
-	const transcriptPath = resolveNonCollidingPath(app, folderPath, baseName);
+	const transcriptPath = resolveNonCollidingPath(app, folderPath, `${baseName}-transcript`);
 	const audioLinkMarkdown = audioFile ? buildAudioLinkMarkdown(app, audioFile, transcriptPath) : "";
 	await app.vault.create(transcriptPath, `${audioLinkMarkdown}${transcriptMarkdown}`);
 }

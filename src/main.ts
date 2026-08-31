@@ -1,6 +1,6 @@
-import { App, MarkdownView, Menu, Modal, normalizePath, Notice, Plugin, Setting, TAbstractFile, TFile, TFolder } from "obsidian";
+import { App, Editor, MarkdownFileInfo, MarkdownView, Menu, Modal, normalizePath, Notice, Plugin, Setting, TAbstractFile, TFile, TFolder } from "obsidian";
 import { AudioRecorder, RecordingResult } from "./audio/recorder";
-import { formatTimestampForFilename, isAudioFile, logDebug, RequestAbortedError, runTranscribeAndSummarizePipeline } from "./pipeline";
+import { formatTimestampForFilename, isAudioFile, logDebug, RequestAbortedError, runSummarizeTextPipeline, runTranscribeAndSummarizePipeline } from "./pipeline";
 import { AiTranscribeSummarySettingTab, AiTranscribeSummarySettings, DEFAULT_SETTINGS } from "./settings";
 
 /** audio/webm -> webm, audio/ogg;codecs=opus -> ogg, etc. */
@@ -226,9 +226,26 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 			},
 		});
 
+		this.addCommand({
+			id: "summarize-active-note",
+			name: "Summarize note",
+			editorCallback: (editor, view) => void this.summarizeText(editor, editor.getValue(), false, view.file?.basename ?? "note"),
+		});
+
+		this.addCommand({
+			id: "summarize-selection",
+			name: "Summarize selection",
+			editorCheckCallback: (checking, editor, view) => {
+				if (!editor.somethingSelected()) return false;
+				if (!checking) void this.summarizeText(editor, editor.getSelection(), true, view.file?.basename ?? "selection");
+				return true;
+			},
+		});
+
 		this.addSettingTab(new AiTranscribeSummarySettingTab(this.app, this));
 
 		this.registerEvent(this.app.workspace.on("file-menu", (menu, file) => this.onFileMenu(menu, file)));
+		this.registerEvent(this.app.workspace.on("editor-menu", (menu, editor, view) => this.onEditorMenu(menu, editor, view)));
 
 		this.lastMarkdownView = this.app.workspace.getActiveViewOfType(MarkdownView) ?? undefined;
 		this.registerEvent(
@@ -241,14 +258,60 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 	}
 
 	private onFileMenu(menu: Menu, file: TAbstractFile) {
-		if (!(file instanceof TFile) || !isAudioFile(file)) return;
+		if (!(file instanceof TFile)) return;
+
+		if (isAudioFile(file)) {
+			menu.addItem((item) =>
+				item
+					.setTitle("Transcribe & summarize")
+					.setIcon("captions")
+					.onClick(() => void this.transcribeAndSummarizeFile(file))
+			);
+			return;
+		}
+
+		if (file.extension === "md") {
+			menu.addItem((item) =>
+				item
+					.setTitle("Summarize note")
+					.setIcon("captions")
+					.onClick(() => void this.summarizeNoteFile(file))
+			);
+		}
+	}
+
+	private onEditorMenu(menu: Menu, editor: Editor, view: MarkdownView | MarkdownFileInfo) {
+		if (!editor.somethingSelected()) return;
 
 		menu.addItem((item) =>
 			item
-				.setTitle("Transcribe & summarize")
+				.setTitle("Summarize selection")
 				.setIcon("captions")
-				.onClick(() => void this.transcribeAndSummarizeFile(file))
+				.onClick(() => void this.summarizeText(editor, editor.getSelection(), true, view.file?.basename ?? "selection"))
 		);
+	}
+
+	/** Right-click "Summarize note" - unlike the editor-command path, the file clicked from the file explorer isn't necessarily the active editor, so this opens/activates it first to get an Editor to write the summary into. */
+	private async summarizeNoteFile(file: TFile): Promise<void> {
+		const leaf = this.app.workspace.getLeaf(false);
+		await leaf.openFile(file);
+		const view = leaf.view;
+		if (!(view instanceof MarkdownView)) {
+			new Notice(`Could not open "${file.basename}" for editing.`);
+			return;
+		}
+		await this.summarizeText(view.editor, view.editor.getValue(), false, file.basename);
+	}
+
+	private async summarizeText(editor: Editor, text: string, replaceSelection: boolean, fileLabel: string): Promise<void> {
+		const { jobId, signal } = this.beginPipelineJob();
+		try {
+			await runSummarizeTextPipeline(this.settings, { text, editor, replaceSelection, fileLabel }, { onProgress: (status) => this.showPipelineProgress(jobId, status), signal });
+		} catch (error) {
+			this.reportPipelineError("summarize", error);
+		} finally {
+			this.endPipelineJob(jobId);
+		}
 	}
 
 	private async transcribeAndSummarizeFile(file: TFile): Promise<void> {
