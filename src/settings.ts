@@ -165,7 +165,7 @@ export const DEFAULT_SETTINGS: AiTranscribeSummarySettings = {
 	summaryProviders: {
 		openai: { apiKey: "", model: "gpt-4o-mini", baseUrl: OPENAI_BASE_URL, temperature: DEFAULT_SUMMARY_TEMPERATURE },
 		openrouter: { apiKey: "", model: "openai/gpt-4o-mini", baseUrl: OPENROUTER_BASE_URL, temperature: DEFAULT_SUMMARY_TEMPERATURE },
-		gemini: { apiKey: "", model: "gemini-2.0-flash", baseUrl: GEMINI_BASE_URL, temperature: DEFAULT_SUMMARY_TEMPERATURE },
+		gemini: { apiKey: "", model: "gemini-3.7-flash", baseUrl: GEMINI_BASE_URL, temperature: DEFAULT_SUMMARY_TEMPERATURE },
 	},
 	summaryPrompt: DEFAULT_SUMMARY_PROMPT,
 	generateSummary: true,
@@ -224,10 +224,11 @@ const PROVIDER_SETTINGS_SCHEMA: Record<TranscriptionProviderId, TranscriptionPro
 
 interface SummaryProviderSchemaEntry {
 	label: string;
-	description: string;
+	/** Only Gemini needs a link out to its key-creation page; everyone else gets a plain description. */
+	description: string | DocumentFragment;
 	apiKeyPlaceholder: string;
 	modelPlaceholder: string;
-	/** Only OpenRouter needs a link out to its model catalog; everyone else gets a plain description. */
+	/** Only OpenRouter and Gemini need a link out to their model catalog; everyone else gets a plain description. */
 	modelDesc: string | DocumentFragment;
 }
 
@@ -235,10 +236,18 @@ interface SummaryProviderSchemaEntry {
 export const SUMMARY_PROVIDER_SCHEMA: Record<SummaryProviderId, SummaryProviderSchemaEntry> = {
 	openai: {
 		label: "OpenAI",
-		description: "Uses the OpenAI Chat Completions API directly.",
+		description: createFragment((el) => {
+			el.appendText("Uses the OpenAI Chat Completions API directly. Get a key from the ");
+			el.createEl("a", { text: "OpenAI API keys page", href: "https://platform.openai.com/api-keys" });
+			el.appendText(".");
+		}),
 		apiKeyPlaceholder: "sk-...",
 		modelPlaceholder: "gpt-4o-mini",
-		modelDesc: "Model used to generate the structured summary from the transcript.",
+		modelDesc: createFragment((el) => {
+			el.appendText("Model used to generate the structured summary from the transcript. See available models in the ");
+			el.createEl("a", { text: "OpenAI models docs", href: "https://platform.openai.com/docs/models" });
+			el.appendText(".");
+		}),
 	},
 	openrouter: {
 		label: "OpenRouter",
@@ -253,12 +262,16 @@ export const SUMMARY_PROVIDER_SCHEMA: Record<SummaryProviderId, SummaryProviderS
 	},
 	gemini: {
 		label: "Google Gemini",
-		description: "Uses Google's Gemini API directly, via its OpenAI-compatible endpoint.",
-		apiKeyPlaceholder: "AIza...",
-		modelPlaceholder: "gemini-2.0-flash",
-		modelDesc: createFragment((el) => {
-			el.appendText("Gemini model used to generate the structured summary from the transcript. See available models on ");
+		description: createFragment((el) => {
+			el.appendText("Uses Google's Gemini API directly, via its OpenAI-compatible endpoint. Get a key from ");
 			el.createEl("a", { text: "Google AI Studio", href: "https://aistudio.google.com/apikey" });
+			el.appendText(".");
+		}),
+		apiKeyPlaceholder: "AIza...",
+		modelPlaceholder: "gemini-3.7-flash",
+		modelDesc: createFragment((el) => {
+			el.appendText("Gemini model used to generate the structured summary from the transcript. See available models in the ");
+			el.createEl("a", { text: "Gemini API docs", href: "https://ai.google.dev/gemini-api/docs/models" });
 			el.appendText(".");
 		}),
 	},
@@ -276,7 +289,9 @@ const VISIBILITY_DRIVING_KEYS = new Set<string>([
 	"cleanupTranscript",
 	"saveAudioFile",
 	"transcriptPlacement",
-	"reuseWhisperKeyForSummary",
+	"reuseWhisperKeyForSummary.openai",
+	"reuseWhisperKeyForSummary.openrouter",
+	"reuseWhisperKeyForSummary.gemini",
 ]);
 
 export class AiTranscribeSummarySettingTab extends PluginSettingTab {
@@ -317,7 +332,9 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 				return settings.generateSummary;
 			case "summaryProvider":
 				return settings.summaryProvider;
-			case "reuseWhisperKeyForSummary":
+			case "reuseWhisperKeyForSummary.openai":
+			case "reuseWhisperKeyForSummary.openrouter":
+			case "reuseWhisperKeyForSummary.gemini":
 				return settings.reuseWhisperKeyForSummary;
 			case "summaryProviders.openai.model":
 				return settings.summaryProviders.openai.model;
@@ -399,7 +416,9 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 			case "summaryProvider":
 				settings.summaryProvider = value as SummaryProviderId;
 				break;
-			case "reuseWhisperKeyForSummary":
+			case "reuseWhisperKeyForSummary.openai":
+			case "reuseWhisperKeyForSummary.openrouter":
+			case "reuseWhisperKeyForSummary.gemini":
 				settings.reuseWhisperKeyForSummary = value as boolean;
 				break;
 			case "summaryProviders.openai.model":
@@ -538,13 +557,13 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 
 		return [
 			{
-				name: "",
+				name: `${schema.label} provider info`,
 				desc: schema.description,
 				visible,
 				render: () => {},
 			},
 			{
-				name: "API key",
+				name: `${schema.label} API key`,
 				desc: "Used for Whisper transcription. Also used for summary generation unless a separate summary API key is set below.",
 				visible,
 				render: (setting) => {
@@ -560,7 +579,7 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 				},
 			},
 			{
-				name: "Model",
+				name: `${schema.label} model`,
 				desc: schema.modelDesc,
 				visible,
 				control: {
@@ -570,7 +589,7 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 				},
 			},
 			{
-				name: "Base URL",
+				name: `${schema.label} base URL`,
 				desc: "Edit directly to point at a proxy or self-hosted endpoint.",
 				visible,
 				control: {
@@ -717,7 +736,9 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 				desc: `Transcription is currently configured to call ${reuseHostLabel} - reuse that same key for summary generation instead of a separate key here.`,
 				// Gemini isn't a transcription provider, so reuse never applies to it.
 				visible: () => providerId !== "gemini" && groupVisible() && transcriptionKeyReuseTarget(this.plugin.settings) === providerId,
-				control: { type: "toggle", key: "reuseWhisperKeyForSummary" },
+				// Provider-qualified key: only one of these is ever visible at a time, but all three
+				// share the same underlying `reuseWhisperKeyForSummary` setting (see get/setControlValue).
+				control: { type: "toggle", key: `reuseWhisperKeyForSummary.${providerId}` },
 			},
 			{
 				name: `${schema.label} API key`,
@@ -738,7 +759,7 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 				},
 			},
 			{
-				name: "Model",
+				name: `${schema.label} model`,
 				desc: schema.modelDesc,
 				visible: groupVisible,
 				control: {
@@ -748,7 +769,7 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 				},
 			},
 			{
-				name: "Temperature",
+				name: `${schema.label} temperature`,
 				desc: `Randomness of the generated summary, from 0 (deterministic, sticks close to the transcript) to 2 (more creative, more prone to inventing details). Default ${DEFAULT_SUMMARY_TEMPERATURE} favors accuracy.`,
 				visible: groupVisible,
 				control: {
@@ -762,7 +783,7 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 				},
 			},
 			{
-				name: "Base URL",
+				name: `${schema.label} base URL`,
 				desc: "Edit directly to point at a proxy or self-hosted endpoint.",
 				visible: groupVisible,
 				control: {
