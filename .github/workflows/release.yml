@@ -16,6 +16,8 @@ jobs:
     if: github.actor == 'onlyutkarsh'
     permissions:
       contents: write
+      attestations: write
+      id-token: write
 
     steps:
       - name: Checkout repository
@@ -58,6 +60,13 @@ jobs:
 
       - name: Build plugin
         run: npm run build
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            main.js
+            styles.css
 
       - name: Commit version bump
         run: |
