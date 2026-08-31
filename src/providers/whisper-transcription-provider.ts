@@ -12,6 +12,12 @@ export interface WhisperProviderConfig {
 	apiModel: string;
 }
 
+/** Whisper transcription response shape, narrowed to the fields this provider reads. */
+interface WhisperResponseBody {
+	error?: { message?: string };
+	text?: string;
+}
+
 const MAX_RETRIES = 3;
 const RETRY_BASE_DELAY_MS = 1000;
 /** Chunk uploads in flight at once - bounded rather than unbounded so memory (each chunk's encoded WAV bytes held until its request completes) and provider rate-limit exposure stay modest on meetings with many chunks. */
@@ -70,7 +76,7 @@ export class WhisperTranscriptionProvider implements TranscriptionProvider {
 	 * original chunk order even though completion order may differ.
 	 */
 	private async transcribeChunksConcurrently(
-		pieces: AsyncIterable<{ data: ArrayBuffer; mimeType: string }>,
+		pieces: AsyncIterable<{ data: ArrayBuffer; mimeType: string }, void, unknown>,
 		vocabularyHints: string,
 		onProgress: (status: string) => void
 	): Promise<string[]> {
@@ -126,12 +132,14 @@ export class WhisperTranscriptionProvider implements TranscriptionProvider {
 		});
 		logDebug(`whisper: chunk ${index + 1} responded`, { status: response.status, durationMs: Date.now() - startedAt });
 
+		const json = response.json as WhisperResponseBody | undefined;
+
 		if (response.status >= 400) {
-			const detail = response.json?.error?.message ?? response.text;
+			const detail = json?.error?.message ?? response.text;
 			throw new Error(`Whisper transcription failed on chunk ${index + 1} (HTTP ${response.status}): ${detail}`);
 		}
 
-		return typeof response.json?.text === "string" ? response.json.text : "";
+		return typeof json?.text === "string" ? json.text : "";
 	}
 
 	/** Retries on thrown errors (network failures) and on HTTP 429/5xx responses (rate limits, transient server errors) - anything else is returned as-is for the caller to turn into a terminal error. */
@@ -159,5 +167,5 @@ export class WhisperTranscriptionProvider implements TranscriptionProvider {
 }
 
 function sleep(ms: number): Promise<void> {
-	return new Promise((resolve) => setTimeout(resolve, ms));
+	return new Promise((resolve) => window.setTimeout(resolve, ms));
 }

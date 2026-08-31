@@ -26,7 +26,7 @@ export function needsChunking(blob: Blob): boolean {
  * all chunks simultaneously. The decoded PCM buffer itself must stay alive for the whole
  * generator's lifetime since chunks are sliced from it directly.
  */
-export async function* chunkAtSilence(blob: Blob, targetChunkBytes = WHISPER_CHUNK_THRESHOLD_BYTES): AsyncGenerator<AudioChunk> {
+export async function* chunkAtSilence(blob: Blob, targetChunkBytes = WHISPER_CHUNK_THRESHOLD_BYTES): AsyncGenerator<AudioChunk, void, unknown> {
 	const audioContext = new AudioContext();
 	let buffer: AudioBuffer;
 	try {

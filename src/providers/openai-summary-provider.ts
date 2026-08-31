@@ -10,6 +10,12 @@ export interface OpenAiSummaryProviderConfig {
 	temperature: number;
 }
 
+/** Chat Completions response shape, narrowed to the fields this provider reads. */
+interface ChatCompletionsResponseBody {
+	error?: { message?: string };
+	choices?: { message?: { content?: string } }[];
+}
+
 /** Backs both "openai" and "openrouter" - OpenRouter exposes the same Chat Completions request/response shape. */
 export class OpenAiSummaryProvider implements SummaryProvider {
 	constructor(readonly id: SummaryProviderId, private config: OpenAiSummaryProviderConfig) {}
@@ -39,12 +45,14 @@ export class OpenAiSummaryProvider implements SummaryProvider {
 		});
 		logDebug(`${this.id} summary: responded`, { status: response.status, durationMs: Date.now() - startedAt });
 
+		const json = response.json as ChatCompletionsResponseBody | undefined;
+
 		if (response.status >= 400) {
-			const detail = response.json?.error?.message ?? response.text;
+			const detail = json?.error?.message ?? response.text;
 			throw new Error(`Summary generation failed (HTTP ${response.status}): ${detail}`);
 		}
 
-		const summary = response.json?.choices?.[0]?.message?.content;
+		const summary = json?.choices?.[0]?.message?.content;
 		if (typeof summary !== "string" || !summary.trim()) {
 			throw new Error("Summary generation returned an empty response.");
 		}

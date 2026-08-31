@@ -63,7 +63,8 @@ class StopRecordingConfirmModal extends Modal {
 			.addButton((button) =>
 				button
 					.setButtonText("Stop recording")
-					.setWarning()
+					.setDestructive()
+					.setCta()
 					.onClick(() => {
 						this.confirmed = true;
 						this.close();
@@ -451,7 +452,7 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 	}
 
 	async loadSettings() {
-		const saved: Partial<AiTranscribeSummarySettings> = (await this.loadData()) ?? {};
+		const saved = ((await this.loadData()) ?? {}) as Partial<AiTranscribeSummarySettings>;
 
 		// Object.assign only merges top-level keys - a saved settings file from
 		// before a field was added to a nested per-provider object (e.g.
