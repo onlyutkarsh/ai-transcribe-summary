@@ -1,7 +1,7 @@
 {
 	"id": "ai-transcribe-summary",
 	"name": "AI Transcribe and Summary",
-	"version": "1.0.9",
+	"version": "1.1.0",
 	"minAppVersion": "1.13.0",
 	"description": "Record meetings, transcribe reliably past size/silence failure modes, and produce a structured summary alongside the full transcript.",
 	"author": "Utkarsh",
