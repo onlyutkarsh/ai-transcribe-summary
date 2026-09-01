@@ -22,6 +22,49 @@
 	justify-content: flex-end;
 }
 
-.ai-transcribe-summary-ribbon-icon.is-active {
-	color: var(--color-red);
+.ai-transcribe-summary-ribbon-icon {
+	--ai-transcribe-summary-bar-1: 0;
+	--ai-transcribe-summary-bar-2: 0;
+	--ai-transcribe-summary-bar-3: 0;
+	--ai-transcribe-summary-bar-4: 0;
+	--ai-transcribe-summary-bar-5: 0;
+	--ai-transcribe-summary-bar-6: 0;
+}
+
+/* Lucide "audio-lines" is 6 vertical-line <path>s; scale each around its own
+   center (fill-box, not the shared viewBox origin) so they grow both up and
+   down like a level meter instead of shooting off from the top. Each bar's
+   --ai-transcribe-summary-bar-N is already smoothed in JS (its own low-pass
+   filter over the raw RMS reading, so bars visibly differ from one another) -
+   a further CSS transition here would blur that per-bar shape back together. */
+.ai-transcribe-summary-ribbon-icon.is-active:not(.is-paused) svg path {
+	transform-box: fill-box;
+	transform-origin: center;
+	transition: transform 30ms linear;
+}
+
+.ai-transcribe-summary-ribbon-icon.is-active:not(.is-paused) svg path:nth-child(1) {
+	transform: scaleY(calc(1 + 1.8 * var(--ai-transcribe-summary-bar-1)));
+}
+.ai-transcribe-summary-ribbon-icon.is-active:not(.is-paused) svg path:nth-child(2) {
+	transform: scaleY(calc(1 + 1.8 * var(--ai-transcribe-summary-bar-2)));
+}
+.ai-transcribe-summary-ribbon-icon.is-active:not(.is-paused) svg path:nth-child(3) {
+	transform: scaleY(calc(1 + 1.8 * var(--ai-transcribe-summary-bar-3)));
+}
+.ai-transcribe-summary-ribbon-icon.is-active:not(.is-paused) svg path:nth-child(4) {
+	transform: scaleY(calc(1 + 1.8 * var(--ai-transcribe-summary-bar-4)));
+}
+.ai-transcribe-summary-ribbon-icon.is-active:not(.is-paused) svg path:nth-child(5) {
+	transform: scaleY(calc(1 + 1.8 * var(--ai-transcribe-summary-bar-5)));
+}
+.ai-transcribe-summary-ribbon-icon.is-active:not(.is-paused) svg path:nth-child(6) {
+	transform: scaleY(calc(1 + 1.8 * var(--ai-transcribe-summary-bar-6)));
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.ai-transcribe-summary-ribbon-icon.is-active:not(.is-paused) svg path {
+		transform: none;
+		transition: none;
+	}
 }

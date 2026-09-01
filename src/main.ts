@@ -1,5 +1,5 @@
-import { App, Editor, MarkdownView, Menu, Modal, normalizePath, Notice, Plugin, Setting, TAbstractFile, TFile, TFolder } from "obsidian";
-import { AudioRecorder, isRecordingSilent, RecordingResult } from "./audio/recorder";
+import { App, Editor, MarkdownView, Menu, Modal, normalizePath, Notice, Plugin, setIcon, Setting, TAbstractFile, TFile, TFolder } from "obsidian";
+import { AudioRecorder, isRecordingSilent, LEVEL_BAND_COUNT, RecordingResult } from "./audio/recorder";
 import { AudioSource, formatTimestampForFilename, isAudioFile, logDebug, RequestAbortedError, runSummarizeTextPipeline, runTranscribeAndSummarizePipeline } from "./pipeline";
 import { AiTranscribeSummarySettingTab, AiTranscribeSummarySettings, DEFAULT_SETTINGS } from "./settings";
 
@@ -139,15 +139,22 @@ class StartRecordingConfirmModal extends Modal {
 class SilentRecordingConfirmModal extends Modal {
 	private confirmed = false;
 
-	constructor(app: App, private onConfirm: () => void, private onCancel: () => void) {
+	constructor(app: App, private undecodable: boolean, private onConfirm: () => void, private onCancel: () => void) {
 		super(app);
 	}
 
 	onOpen() {
-		this.setTitle("Recording appears to be silent");
-		this.contentEl.createEl("p", {
-			text: "No audio signal was detected in this recording. You can still transcribe and summarize it, but the result may be empty.",
-		});
+		if (this.undecodable) {
+			this.setTitle("Recording could not be checked");
+			this.contentEl.createEl("p", {
+				text: "This audio could not be read - it may be empty or corrupted. Sending it for transcription is likely to fail.",
+			});
+		} else {
+			this.setTitle("Recording appears to be silent");
+			this.contentEl.createEl("p", {
+				text: "No audio signal was detected in this recording. You can still transcribe and summarize it, but the result may be empty.",
+			});
+		}
 
 		new Setting(this.contentEl)
 			.addButton((button) => button.setButtonText("Discard").onClick(() => this.close()))
@@ -185,6 +192,8 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 	private timerIntervalId: number | undefined;
 	private ribbonIconEl!: HTMLElement;
 	private recorder = new AudioRecorder();
+	/** Guards the dead-mic Notice so it's shown at most once per recording, even though onDeadMic itself already fires only once. */
+	private deadMicWarned = false;
 
 	/**
 	 * Last markdown note the user was actually editing, updated live via
@@ -511,12 +520,15 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 
 	private async startRecording() {
 		this.transitioning = true;
+		this.deadMicWarned = false;
 		try {
 			await this.recorder.start({
 				microphoneDeviceId: this.settings.microphoneDeviceId,
 				bitrateKbps: this.settings.audioBitrateKbps,
 				silenceAutoStopMinutes: this.settings.silenceAutoStopMinutes,
 				onSilenceTimeout: () => this.autoStopRecording(`${this.settings.silenceAutoStopMinutes} minutes of silence`),
+				onLevel: (bands) => this.updateRibbonLevel(bands),
+				onDeadMic: () => this.warnDeadMic(),
 			});
 		} catch (error) {
 			console.error("ai-transcribe-summary: failed to start recording", error);
@@ -538,6 +550,7 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 		this.accumulatedMs = 0;
 		this.segmentStartedAt = Date.now();
 
+		setIcon(this.ribbonIconEl, "audio-lines");
 		this.ribbonIconEl.addClass("is-active");
 		this.ribbonIconEl.setAttribute("aria-label", "Stop meeting recording");
 
@@ -546,11 +559,38 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 		this.startTimer();
 	}
 
+	/**
+	 * Writes real per-band levels (already ballistics-processed in AudioRecorder - fast attack,
+	 * slow release, per-band peak auto-gain) straight to the ribbon's --ai-transcribe-summary-bar-N
+	 * CSS vars for the "audio-lines" icon. No-op once not recording, so a frame queued just
+	 * before pause/stop can't resurrect the animation.
+	 */
+	private updateRibbonLevel(bands: Float32Array) {
+		if (this.state !== "recording") return;
+		for (let i = 0; i < bands.length; i++) {
+			this.ribbonIconEl.style.setProperty(`--ai-transcribe-summary-bar-${i + 1}`, bands[i].toFixed(3));
+		}
+	}
+
+	private resetRibbonLevel() {
+		for (let i = 1; i <= LEVEL_BAND_COUNT; i++) {
+			this.ribbonIconEl.style.removeProperty(`--ai-transcribe-summary-bar-${i}`);
+		}
+	}
+
+	/** Surfaces a likely-dead mic (no input at all in the first few seconds) immediately, rather than letting the user talk into a recording that's silently producing nothing. */
+	private warnDeadMic() {
+		if (this.deadMicWarned || this.state !== "recording") return;
+		this.deadMicWarned = true;
+		new Notice("No microphone input detected. Check your mic - this recording may come out empty.", 8000);
+	}
+
 	private pauseRecording() {
 		this.recorder.pause();
 		this.accumulatedMs += Date.now() - this.segmentStartedAt;
 		this.state = "paused";
 		this.ribbonIconEl.addClass("is-paused");
+		this.resetRibbonLevel();
 		this.stopTimer();
 		this.updateStatusBar();
 	}
@@ -576,18 +616,22 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 			new Notice("Recording stop failed - no audio was saved.");
 			this.state = "idle";
 			this.transitioning = false;
+			setIcon(this.ribbonIconEl, "mic");
 			this.ribbonIconEl.removeClass("is-active");
 			this.ribbonIconEl.removeClass("is-paused");
 			this.ribbonIconEl.setAttribute("aria-label", "Start meeting recording");
+			this.resetRibbonLevel();
 			this.statusBarItem.hide();
 			return;
 		}
 
 		this.state = "idle";
 		this.transitioning = false;
+		setIcon(this.ribbonIconEl, "mic");
 		this.ribbonIconEl.removeClass("is-active");
 		this.ribbonIconEl.removeClass("is-paused");
 		this.ribbonIconEl.setAttribute("aria-label", "Start meeting recording");
+		this.resetRibbonLevel();
 
 		if (result.durationMs < MIN_RECORDING_MS) {
 			new Notice("Recording was too short to transcribe - nothing was saved.");
@@ -625,18 +669,22 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 	 * that's blank/corrupted.
 	 */
 	private async runPipelineWithSilenceCheck(source: AudioSource) {
-		// Best-effort: an undecodable blob (unsupported format) fails open and proceeds to the
-		// pipeline rather than blocking a recording this check simply can't evaluate.
+		// An undecodable blob (near-empty/corrupt audio, or a genuinely unsupported format) is
+		// surfaced to the user the same way a silent recording is, rather than proceeding straight
+		// to the transcription provider - which would otherwise fail with an opaque HTTP 400.
 		let silent = false;
+		let undecodable = false;
 		try {
 			silent = await isRecordingSilent(source.blob);
 		} catch (error) {
-			console.error("ai-transcribe-summary: silence check failed, proceeding anyway", error);
+			console.error("ai-transcribe-summary: silence check failed", error);
+			undecodable = true;
 		}
 
-		if (silent) {
+		if (silent || undecodable) {
 			new SilentRecordingConfirmModal(
 				this.app,
+				undecodable,
 				() => void this.runPipeline(source),
 				() => {
 					/* discarded - raw audio (if saveAudioFile is on, or the file already in the vault) is untouched */
