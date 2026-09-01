@@ -42,12 +42,14 @@ jobs:
       - name: Resolve release version
         id: resolve_version
         run: |
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          echo "last_tag=$LAST_TAG" >> "$GITHUB_OUTPUT"
+
           INPUT_VERSION="${{ inputs.version }}"
           if [ -n "$INPUT_VERSION" ]; then
             VERSION="$INPUT_VERSION"
           else
-            LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "0.0.0")
-            COMMITS=$(git log "${LAST_TAG}..HEAD" --pretty=%s 2>/dev/null || git log --pretty=%s)
+            COMMITS=$(git log "${LAST_TAG:+$LAST_TAG..}HEAD" --pretty=%s)
 
             BUMP=""
             if echo "$COMMITS" | grep -qE '^[a-z]+(\([^)]+\))?!:|BREAKING CHANGE'; then
@@ -63,7 +65,7 @@ jobs:
               exit 1
             fi
 
-            IFS=. read -r MAJOR MINOR PATCH <<< "$LAST_TAG"
+            IFS=. read -r MAJOR MINOR PATCH <<< "${LAST_TAG:-0.0.0}"
             case "$BUMP" in
               major) VERSION="$((MAJOR + 1)).0.0" ;;
               minor) VERSION="${MAJOR}.$((MINOR + 1)).0" ;;
@@ -116,16 +118,13 @@ jobs:
 
       - name: Generate release notes
         id: release_notes
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const { data } = await github.rest.repos.generateReleaseNotes({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              tag_name: '${{ steps.resolve_version.outputs.version }}'
-            });
-            return data.body;
-          result-encoding: string
+        run: |
+          LAST_TAG="${{ steps.resolve_version.outputs.last_tag }}"
+          {
+            echo "notes<<EOF"
+            git log "${LAST_TAG:+$LAST_TAG..}${{ steps.resolve_version.outputs.version }}" --pretty='- %s'
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -138,7 +137,7 @@ jobs:
             main.js
             manifest.json
             styles.css
-          body: ${{ steps.release_notes.outputs.result }}
+          body: ${{ steps.release_notes.outputs.notes }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
