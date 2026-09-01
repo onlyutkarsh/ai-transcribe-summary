@@ -320,7 +320,7 @@ export class AudioRecorder {
 
 		const tick = () => {
 			if (this.paused) {
-				this.levelAnimationId = requestAnimationFrame(tick);
+				this.levelAnimationId = window.requestAnimationFrame(tick);
 				return;
 			}
 
@@ -345,10 +345,10 @@ export class AudioRecorder {
 			}
 
 			onLevel(smoothed);
-			this.levelAnimationId = requestAnimationFrame(tick);
+			this.levelAnimationId = window.requestAnimationFrame(tick);
 		};
 
-		this.levelAnimationId = requestAnimationFrame(tick);
+		this.levelAnimationId = window.requestAnimationFrame(tick);
 	}
 
 	private stopLevelMonitor(): void {
@@ -357,7 +357,7 @@ export class AudioRecorder {
 			this.silencePollId = undefined;
 		}
 		if (this.levelAnimationId !== undefined) {
-			cancelAnimationFrame(this.levelAnimationId);
+			window.cancelAnimationFrame(this.levelAnimationId);
 			this.levelAnimationId = undefined;
 		}
 		this.analyser = undefined;
