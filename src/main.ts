@@ -56,6 +56,15 @@ function formatElapsed(ms: number): string {
 
 type RecordingState = "idle" | "recording" | "paused";
 
+/** Shape of app.plugins.plugins['notebook-navigator']?.api, limited to the file-menu registration this plugin uses. See https://github.com/johansan/notebook-navigator/blob/main/docs/api-reference.md#menus-api */
+interface NotebookNavigatorApi {
+	menus?: {
+		registerFileMenu?: (
+			callback: (context: { addItem: Menu["addItem"]; file: TFile; selection: { mode: "single" | "multiple" } }) => void
+		) => () => void;
+	};
+}
+
 class StopRecordingConfirmModal extends Modal {
 	private confirmed = false;
 
@@ -130,6 +139,8 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 	declare settings: AiTranscribeSummarySettings;
 
 	private statusBarItem!: HTMLElement;
+	private statusBarDotEl!: HTMLElement;
+	private statusBarTextEl!: HTMLElement;
 	private state: RecordingState = "idle";
 	/** True while start/stop is in flight (awaiting mic permission or recorder.stop()'s final chunk) - blocks re-entrant start/stop so a quick second action can't race the recorder's stream/chunks out from under the in-flight one. */
 	private transitioning = false;
@@ -151,6 +162,9 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 	 */
 	private lastMarkdownView: MarkdownView | undefined;
 
+	/** Unregisters this plugin's Notebook Navigator file-menu callback, if that integration was set up in onload(). */
+	private notebookNavigatorMenuDispose: (() => void) | undefined;
+
 	/** One entry per in-flight pipeline job (a right-click "Transcribe & summarize", or the post-recording pipeline), keyed by a locally-unique id - so one job finishing doesn't stop/hide the shared status bar spinner while others are still running. */
 	private activePipelineJobs = new Map<number, string>();
 	/** AbortController per in-flight pipeline job, keyed the same as activePipelineJobs - "Stop transcription/summary" aborts every job currently running, since the status bar/command palette don't distinguish which job is which. */
@@ -163,6 +177,9 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 		await this.loadSettings();
 
 		this.statusBarItem = this.addStatusBarItem();
+		this.statusBarDotEl = this.statusBarItem.createSpan({ cls: "ai-transcribe-summary-status-dot" });
+		this.statusBarDotEl.hide();
+		this.statusBarTextEl = this.statusBarItem.createSpan();
 		this.statusBarItem.hide();
 
 		this.ribbonIconEl = this.addRibbonIcon("mic", "Start meeting recording", () => {
@@ -235,6 +252,7 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 		this.addSettingTab(new AiTranscribeSummarySettingTab(this.app, this));
 
 		this.registerEvent(this.app.workspace.on("file-menu", (menu, file) => this.onFileMenu(menu, file)));
+		this.registerNotebookNavigatorMenu();
 
 		this.lastMarkdownView = this.app.workspace.getActiveViewOfType(MarkdownView) ?? undefined;
 		this.registerEvent(
@@ -248,7 +266,10 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 
 	private onFileMenu(menu: Menu, file: TAbstractFile) {
 		if (!(file instanceof TFile)) return;
+		this.addFileMenuItems(menu, file);
+	}
 
+	private addFileMenuItems(menu: Pick<Menu, "addItem">, file: TFile) {
 		if (isAudioFile(file)) {
 			menu.addItem((item) =>
 				item
@@ -266,6 +287,28 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 					.setIcon("captions")
 					.onClick(() => void this.summarizeNoteFile(file))
 			);
+		}
+	}
+
+	/**
+	 * Notebook Navigator replaces the default file explorer with its own UI and builds its
+	 * own Menu instance on right-click instead of firing the standard "file-menu" workspace
+	 * event, so onFileMenu() above never runs there. Notebook Navigator instead exposes its
+	 * own extension API (api.menus.registerFileMenu) for this exact case - hook into it when
+	 * present so our items also show up inside its navigator. No-op if it isn't installed.
+	 */
+	private registerNotebookNavigatorMenu() {
+		const nn = (this.app as unknown as { plugins?: { plugins?: Record<string, { api?: NotebookNavigatorApi }> } }).plugins?.plugins?.[
+			"notebook-navigator"
+		]?.api;
+
+		try {
+			this.notebookNavigatorMenuDispose = nn?.menus?.registerFileMenu?.(({ addItem, file, selection }) => {
+				if (selection.mode !== "single") return;
+				this.addFileMenuItems({ addItem }, file);
+			});
+		} catch (error) {
+			logDebug("Notebook Navigator menu integration failed to register", error);
 		}
 	}
 
@@ -339,6 +382,7 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 	private showPipelineProgress(jobId: number, status: string) {
 		this.activePipelineJobs.set(jobId, status);
 		this.statusBarItem.show();
+		this.statusBarDotEl.hide();
 		this.renderPipelineProgress();
 
 		if (this.pipelineAnimationIntervalId === undefined) {
@@ -358,7 +402,7 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 		const mostRecent = statuses[statuses.length - 1];
 		const otherCount = statuses.length - 1;
 		const suffix = otherCount > 0 ? ` (+${otherCount} more)` : "";
-		this.statusBarItem.setText(`${frame} ${mostRecent}${suffix}`);
+		this.statusBarTextEl.setText(`${frame} ${mostRecent}${suffix}`);
 	}
 
 	/** Ends one pipeline job. Only stops the shared spinner/hides the status bar once no other job is still active. */
@@ -385,6 +429,7 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 
 	onunload() {
 		this.unloaded = true;
+		this.notebookNavigatorMenuDispose?.();
 		this.stopTimer();
 		if (this.state !== "idle") {
 			this.recorder.discard();
@@ -475,6 +520,7 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 		this.recorder.pause();
 		this.accumulatedMs += Date.now() - this.segmentStartedAt;
 		this.state = "paused";
+		this.ribbonIconEl.addClass("is-paused");
 		this.stopTimer();
 		this.updateStatusBar();
 	}
@@ -483,6 +529,7 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 		this.recorder.resume();
 		this.segmentStartedAt = Date.now();
 		this.state = "recording";
+		this.ribbonIconEl.removeClass("is-paused");
 		this.updateStatusBar();
 		this.startTimer();
 	}
@@ -500,6 +547,7 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 			this.state = "idle";
 			this.transitioning = false;
 			this.ribbonIconEl.removeClass("is-active");
+			this.ribbonIconEl.removeClass("is-paused");
 			this.ribbonIconEl.setAttribute("aria-label", "Start meeting recording");
 			this.statusBarItem.hide();
 			return;
@@ -508,6 +556,7 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 		this.state = "idle";
 		this.transitioning = false;
 		this.ribbonIconEl.removeClass("is-active");
+		this.ribbonIconEl.removeClass("is-paused");
 		this.ribbonIconEl.setAttribute("aria-label", "Start meeting recording");
 
 		if (result.durationMs < MIN_RECORDING_MS) {
@@ -596,9 +645,11 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 		// this 1s timer tick and the 100ms spinner tick fight over the same line. The max-duration
 		// check below still runs regardless, so a long recording auto-stops even mid-pipeline-job.
 		if (this.activePipelineJobs.size === 0) {
-			const icon = this.state === "paused" ? "⏸" : "🔴";
-			const label = this.state === "paused" ? "Paused" : "Recording";
-			this.statusBarItem.setText(`${icon} ${label} ${formatElapsed(elapsed)}`);
+			const isPaused = this.state === "paused";
+			const label = isPaused ? "Paused" : "Recording";
+			this.statusBarDotEl.show();
+			this.statusBarDotEl.toggleClass("is-paused", isPaused);
+			this.statusBarTextEl.setText(`${label} ${formatElapsed(elapsed)}`);
 		}
 
 		const maxMs = this.settings.maxRecordingHours * 60 * 60 * 1000;
