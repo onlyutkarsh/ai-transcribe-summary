@@ -138,6 +138,8 @@ export interface AiTranscribeSummarySettings {
 	summaryProvider: SummaryProviderId;
 	summaryProviders: SummaryProviderSettingsMap;
 	summaryPrompt: string;
+	/** When off, a stopped recording is only saved as audio (requires saveAudioFile) - no transcription call, no cleanup, no summary. */
+	transcribeAudio: boolean;
 	/** When off, the pipeline stops after transcription - no LLM call, no summary note. */
 	generateSummary: boolean;
 	/** Reuse the transcription provider's own apiKey for summaries instead of a separate key. Only applies when summaryProvider matches transcriptionProvider (see transcriptionKeyReuseTarget). */
@@ -197,6 +199,7 @@ export const DEFAULT_SETTINGS: AiTranscribeSummarySettings = {
 		gemini: { apiKey: "", model: "gemini-3.7-flash", baseUrl: GEMINI_BASE_URL, temperature: DEFAULT_SUMMARY_TEMPERATURE },
 	},
 	summaryPrompt: DEFAULT_SUMMARY_PROMPT,
+	transcribeAudio: true,
 	generateSummary: true,
 	reuseWhisperKeyForSummary: false,
 
@@ -314,12 +317,11 @@ const PROVIDER_ORDER: TranscriptionProviderId[] = ["openrouter", "openai"];
 
 /** Keys that gate another definition's `visible` predicate - writing one of these needs a refreshDomState() to update the DOM without a full structural rebuild. */
 const VISIBILITY_DRIVING_KEYS = new Set<string>([
-	"transcriptionProvider",
 	"summaryProvider",
+	"transcribeAudio",
 	"generateSummary",
 	"cleanupTranscript",
 	"saveAudioFile",
-	"transcriptPlacement",
 	"reuseWhisperKeyForSummary.openai",
 	"reuseWhisperKeyForSummary.openrouter",
 	"reuseWhisperKeyForSummary.gemini",
@@ -351,8 +353,8 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 	getControlValue(key: string): unknown {
 		const settings = this.plugin.settings;
 		switch (key) {
-			case "transcriptionProvider":
-				return settings.transcriptionProvider;
+			case "transcribeAudio":
+				return settings.transcribeAudio;
 			case "providers.openai.model":
 				return settings.providers.openai.model;
 			case "providers.openai.baseUrl":
@@ -407,8 +409,6 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 				return settings.saveAudioFile;
 			case "audioFolder":
 				return settings.audioFolder;
-			case "transcriptPlacement":
-				return settings.transcriptPlacement;
 			case "transcriptFolder":
 				return settings.transcriptFolder;
 			case "cleanupTranscript":
@@ -432,8 +432,8 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 	async setControlValue(key: string, value: unknown): Promise<void> {
 		const settings = this.plugin.settings;
 		switch (key) {
-			case "transcriptionProvider":
-				settings.transcriptionProvider = value as TranscriptionProviderId;
+			case "transcribeAudio":
+				settings.transcribeAudio = value as boolean;
 				break;
 			case "providers.openai.model":
 				settings.providers.openai.model = (value as string) || OPENAI_DEFAULT_MODEL;
@@ -524,9 +524,6 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 			case "audioFolder":
 				settings.audioFolder = (value as string) || DEFAULT_SETTINGS.audioFolder;
 				break;
-			case "transcriptPlacement":
-				settings.transcriptPlacement = value as TranscriptPlacement;
-				break;
 			case "transcriptFolder":
 				settings.transcriptFolder = (value as string) || DEFAULT_SETTINGS.transcriptFolder;
 				break;
@@ -543,11 +540,34 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 				return;
 		}
 
+		// Cleanup only ever does useful work feeding a kept transcript or a summary - with both off,
+		// it would otherwise sit on invisibly (its toggle hides too) and still burn a wasted
+		// transcription + cleanup call on every future recording. Force it off here so the setting
+		// doesn't lie dormant.
+		if ((key === "transcribeAudio" || key === "generateSummary") && !settings.transcribeAudio && !settings.generateSummary) {
+			settings.cleanupTranscript = false;
+		}
+
 		await this.plugin.saveSettings();
 
 		if (VISIBILITY_DRIVING_KEYS.has(key)) {
 			this.refreshDomState();
 		}
+	}
+
+	/** Only the explanation for the currently selected transcriptPlacement value - kept in sync imperatively via setting.setDesc() in the "Transcript placement" render callback below, since transcriptPlacement is set outside the generic control key path. */
+	private transcriptPlacementDesc(): string {
+		switch (this.plugin.settings.transcriptPlacement) {
+			case "same-note":
+				return "Written into whichever note the summary lands in - the active note if one was open, or the new note created in the summary folder otherwise.";
+			case "dedicated-file":
+				return "Written to the transcript folder below, separate from the summary note.";
+		}
+	}
+
+	/** Transcription runs whenever the raw transcript is wanted, or its text feeds cleanup/summary - not just when transcribeAudio itself is on. Mirrors needsTranscription() in pipeline.ts. */
+	private needsTranscription(): boolean {
+		return this.plugin.settings.transcribeAudio || this.plugin.settings.generateSummary || this.plugin.settings.cleanupTranscript;
 	}
 
 	private buildTranscriptionGroup(): SettingDefinitionItem {
@@ -557,16 +577,29 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 			items: [
 				{
 					name: "Transcription provider",
-					desc: 'Which service turns your recording\'s audio into text. Used both for live recordings and the right-click "Transcribe & summarize" action.',
-					control: {
-						type: "dropdown",
-						key: "transcriptionProvider",
-						options: Object.fromEntries(PROVIDER_ORDER.map((id) => [id, PROVIDER_SETTINGS_SCHEMA[id].label])),
+					desc: PROVIDER_SETTINGS_SCHEMA[this.plugin.settings.transcriptionProvider].description,
+					visible: () => this.needsTranscription(),
+					// Built manually (rather than `control`) so the desc can be swapped to the newly
+					// selected provider's own description via setting.setDesc() - a plain `control`
+					// dropdown's desc is fixed at render time and won't follow the value.
+					render: (setting) => {
+						setting.addDropdown((dropdown) => {
+							dropdown
+								.addOptions(Object.fromEntries(PROVIDER_ORDER.map((id) => [id, PROVIDER_SETTINGS_SCHEMA[id].label])))
+								.setValue(this.plugin.settings.transcriptionProvider)
+								.onChange(async (value) => {
+									this.plugin.settings.transcriptionProvider = value as TranscriptionProviderId;
+									await this.plugin.saveSettings();
+									setting.setDesc(PROVIDER_SETTINGS_SCHEMA[this.plugin.settings.transcriptionProvider].description);
+									this.refreshDomState();
+								});
+						});
 					},
 				},
 				{
 					name: "Speaking language",
 					desc: "Language spoken in your recordings. The transcript is written in this language, not translated - setting this just improves accuracy and speed, especially for short or accented recordings. Leave on auto-detect if recordings mix languages or aren't in the list.",
+					visible: () => this.needsTranscription(),
 					control: {
 						type: "dropdown",
 						key: "transcriptionLanguage",
@@ -579,27 +612,91 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 				...this.buildTranscriptionProviderFields("openai"),
 				...this.buildTranscriptionProviderFields("openrouter"),
 				{
+					name: "Keep transcript",
+					desc: "When off, the raw transcript is never saved anywhere. Transcription itself still runs in the background if summary generation (under Summary below) or transcript cleanup (further down) is on, since they need the transcript text - this only controls whether you get to keep a copy of it. Turn on 'Save audio file' below too, or a recording with this and summary generation both off keeps nothing at all.",
+					control: { type: "toggle", key: "transcribeAudio" },
+				},
+				{
 					name: "Transcript placement",
-					desc: "Where the full raw transcript is written, relative to the summary. 'Same note' means whichever note the summary actually lands in - the active note if one was open, or the new note created in the summary folder otherwise.",
-					visible: () => this.plugin.settings.generateSummary,
-					control: {
-						type: "dropdown",
-						key: "transcriptPlacement",
-						options: {
-							"same-note": "Same note, below summary",
-							"dedicated-file": "Dedicated file",
-						},
+					desc: this.transcriptPlacementDesc(),
+					visible: () => this.plugin.settings.transcribeAudio,
+					// A plain `control` dropdown's desc is fixed at render time - it won't pick up
+					// transcriptPlacementDesc()'s new text as the value changes without a full page
+					// rebuild. Built manually here (same pattern as the Microphone dropdown above) so
+					// onChange can call setting.setDesc() directly and update the text in place.
+					render: (setting) => {
+						setting.addDropdown((dropdown) => {
+							dropdown
+								.addOptions({
+									"same-note": "Same note, below summary",
+									"dedicated-file": "Dedicated file",
+								})
+								.setValue(this.plugin.settings.transcriptPlacement)
+								.onChange(async (value) => {
+									this.plugin.settings.transcriptPlacement = value as TranscriptPlacement;
+									await this.plugin.saveSettings();
+									setting.setDesc(this.transcriptPlacementDesc());
+									this.refreshDomState();
+								});
+						});
 					},
 				},
 				{
 					name: "Transcript folder",
 					desc: "Vault folder used when transcript placement is 'Dedicated file', or always when summary generation is off (the transcript then always gets its own note here, since there's no summary for it to accompany).",
-					visible: () => this.plugin.settings.transcriptPlacement === "dedicated-file" || !this.plugin.settings.generateSummary,
+					visible: () => this.plugin.settings.transcribeAudio && (this.plugin.settings.transcriptPlacement === "dedicated-file" || !this.plugin.settings.generateSummary),
 					control: {
 						type: "folder",
 						key: "transcriptFolder",
 						placeholder: DEFAULT_SETTINGS.transcriptFolder,
 						includeRoot: true,
+					},
+				},
+				{
+					name: "Clean up transcript",
+					desc: "Run the transcript through an LLM to remove filler words, false starts, and grammar mistakes before it's saved and/or summarized - works whether or not summary generation is on. Uses the provider/model configured under Summary below (that's just where the key lives, regardless of whether summaries are enabled). Adds one extra LLM call per recording. Only useful when the transcript is kept ('Keep transcript' above) or a summary is generated - hidden otherwise.",
+					visible: () => this.plugin.settings.transcribeAudio || this.plugin.settings.generateSummary,
+					control: { type: "toggle", key: "cleanupTranscript" },
+				},
+				{
+					name: "Cleanup prompt",
+					desc: "Instructions sent to the LLM to clean up the raw transcript. Customize the wording, but keep it from summarizing, shortening, or inventing content.",
+					visible: () => this.plugin.settings.cleanupTranscript && (this.plugin.settings.transcribeAudio || this.plugin.settings.generateSummary),
+					render: (setting) => {
+						this.cleanupPromptTextArea = undefined; // Clear stale reference before creating new one
+						setting.setClass("ai-transcribe-summary-prompt-setting");
+						setting.addTextArea((text) => {
+							this.cleanupPromptTextArea = text;
+							text
+								.setPlaceholder(DEFAULT_CLEANUP_PROMPT)
+								.setValue(this.plugin.settings.cleanupPrompt)
+								.onChange(async (value) => {
+									this.plugin.settings.cleanupPrompt = value || DEFAULT_CLEANUP_PROMPT;
+									await this.plugin.saveSettings();
+								});
+							text.inputEl.rows = 8;
+							text.inputEl.addClass("ai-transcribe-summary-prompt");
+						});
+						return () => {
+							this.cleanupPromptTextArea = undefined;
+						};
+					},
+				},
+				{
+					name: "",
+					visible: () => this.plugin.settings.cleanupTranscript && (this.plugin.settings.transcribeAudio || this.plugin.settings.generateSummary),
+					render: (setting) => {
+						setting.setClass("ai-transcribe-summary-prompt-reset");
+						setting.addButton((button) =>
+							button
+								.setIcon("rotate-ccw")
+								.setButtonText("Reset to default prompt")
+								.onClick(async () => {
+									this.plugin.settings.cleanupPrompt = DEFAULT_CLEANUP_PROMPT;
+									await this.plugin.saveSettings();
+									this.cleanupPromptTextArea?.setValue(DEFAULT_CLEANUP_PROMPT);
+								})
+						);
 					},
 				},
 			],
@@ -608,15 +705,9 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 
 	private buildTranscriptionProviderFields(providerId: TranscriptionProviderId): SettingGroupItem[] {
 		const schema = PROVIDER_SETTINGS_SCHEMA[providerId];
-		const visible = () => this.plugin.settings.transcriptionProvider === providerId;
+		const visible = () => this.needsTranscription() && this.plugin.settings.transcriptionProvider === providerId;
 
 		return [
-			{
-				name: `${schema.label} provider info`,
-				desc: schema.description,
-				visible,
-				render: () => {},
-			},
 			{
 				name: `${schema.label} API key`,
 				desc: "Used for Whisper transcription. Also used for summary generation unless a separate summary API key is set below.",
@@ -663,7 +754,7 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 			items: [
 				{
 					name: "Generate summary after transcription",
-					desc: "When off, recording/retry stops after transcription - the transcript is saved but no LLM call is made and no summary note is created.",
+					desc: "When off, no summary LLM call is made and no summary note is created. Independent of 'Keep transcript' above - the transcript is still saved if that's on, even with summaries off.",
 					control: { type: "toggle", key: "generateSummary" },
 				},
 				{
@@ -716,52 +807,6 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 									this.plugin.settings.summaryPrompt = DEFAULT_SUMMARY_PROMPT;
 									await this.plugin.saveSettings();
 									this.summaryPromptTextArea?.setValue(DEFAULT_SUMMARY_PROMPT);
-								})
-						);
-					},
-				},
-				{
-					name: "Clean up transcript",
-					desc: "Run the transcript through the summary provider/model configured above to remove filler words, false starts, and grammar mistakes before it's saved or summarized. Adds one extra LLM call per recording.",
-					control: { type: "toggle", key: "cleanupTranscript" },
-				},
-				{
-					name: "Cleanup prompt",
-					desc: "Instructions sent to the LLM to clean up the raw transcript. Customize the wording, but keep it from summarizing, shortening, or inventing content.",
-					visible: () => this.plugin.settings.cleanupTranscript,
-					render: (setting) => {
-						this.cleanupPromptTextArea = undefined; // Clear stale reference before creating new one
-						setting.setClass("ai-transcribe-summary-prompt-setting");
-						setting.addTextArea((text) => {
-							this.cleanupPromptTextArea = text;
-							text
-								.setPlaceholder(DEFAULT_CLEANUP_PROMPT)
-								.setValue(this.plugin.settings.cleanupPrompt)
-								.onChange(async (value) => {
-									this.plugin.settings.cleanupPrompt = value || DEFAULT_CLEANUP_PROMPT;
-									await this.plugin.saveSettings();
-								});
-							text.inputEl.rows = 8;
-							text.inputEl.addClass("ai-transcribe-summary-prompt");
-						});
-						return () => {
-							this.cleanupPromptTextArea = undefined;
-						};
-					},
-				},
-				{
-					name: "",
-					visible: () => this.plugin.settings.cleanupTranscript,
-					render: (setting) => {
-						setting.setClass("ai-transcribe-summary-prompt-reset");
-						setting.addButton((button) =>
-							button
-								.setIcon("rotate-ccw")
-								.setButtonText("Reset to default prompt")
-								.onClick(async () => {
-									this.plugin.settings.cleanupPrompt = DEFAULT_CLEANUP_PROMPT;
-									await this.plugin.saveSettings();
-									this.cleanupPromptTextArea?.setValue(DEFAULT_CLEANUP_PROMPT);
 								})
 						);
 					},

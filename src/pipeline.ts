@@ -26,8 +26,15 @@ export interface AudioSource {
 /** Called with a short human-readable status as the pipeline moves through stages, so a caller can mirror it in the status bar. */
 export type ProgressCallback = (status: string) => void;
 
+/** True when a recording needs an actual transcription API call - either the transcript itself is wanted, or its text feeds cleanup/summary downstream. False only for a pure audio-only recording (transcript, cleanup, and summary all off), where transcription would be a wasted call. */
+export function needsTranscription(settings: AiTranscribeSummarySettings): boolean {
+	return settings.transcribeAudio || settings.generateSummary || settings.cleanupTranscript;
+}
+
 /** Checks required API keys are set before any request is made, so a misconfigured provider fails immediately with a clear message instead of mid-upload. */
 export function validatePipelineConfig(settings: AiTranscribeSummarySettings): string | undefined {
+	if (!needsTranscription(settings)) return undefined;
+
 	const transcriptionConfig = settings.providers[settings.transcriptionProvider];
 	if (!transcriptionConfig.apiKey) {
 		const label = settings.transcriptionProvider === "openai" ? "OpenAI" : "OpenRouter";
@@ -66,9 +73,20 @@ export function validateSummaryProviderConfig(settings: AiTranscribeSummarySetti
  * at call time - opening the right-click context menu moves the active leaf
  * to the file explorer before the click handler runs, so a lookup done here
  * (e.g. `workspace.activeEditor`/`getActiveViewOfType`) would already be too
- * late even though a note is still open on screen. When settings.generateSummary
- * is off, stops after transcription: the transcript is always saved as its own
- * note in the transcript folder, no LLM call is made, and targetView has no effect.
+ * late even though a note is still open on screen.
+ *
+ * settings.transcribeAudio, settings.generateSummary, and settings.cleanupTranscript
+ * are independent toggles - any combination is valid:
+ * - transcribeAudio controls only whether the raw transcript is ever written anywhere
+ *   (per transcriptPlacement); it does NOT gate whether transcription happens.
+ * - Transcription itself runs whenever transcribeAudio, generateSummary, or
+ *   cleanupTranscript is on - summary/cleanup need transcript text even when the
+ *   user doesn't want the raw transcript kept. See needsTranscription().
+ * - cleanupTranscript, when on, always cleans the transcript text before it's used
+ *   for the kept transcript and/or the summary, regardless of the other two toggles.
+ * - When both transcribeAudio and generateSummary are off, nothing downstream of
+ *   transcription would ever be written, so transcription is skipped entirely and
+ *   the recording is audio-only (targetView has no effect in that case).
  */
 export async function runTranscribeAndSummarizePipeline(
 	app: App,
@@ -90,6 +108,12 @@ export async function runTranscribeAndSummarizePipeline(
 	if (configError) {
 		logDebug("config validation failed", configError);
 		throw new Error(configError);
+	}
+
+	if (!needsTranscription(settings)) {
+		logDebug("pipeline finished (transcript/summary/cleanup all off, audio only)");
+		new Notice(source.audioFile ? `Recording saved as "${source.baseName}" - transcription is off.` : `Recording finished - transcription is off, and "Save audio file" is also off, so nothing was kept.`);
+		return;
 	}
 
 	// Captured up front, not after the transcription/summary calls - the user may switch notes
@@ -151,10 +175,18 @@ export async function runTranscribeAndSummarizePipeline(
 		const transcriptMarkdown = buildTranscriptMarkdown(transcriptText);
 
 		if (!settings.generateSummary) {
-			onProgress("Saving transcript");
-			await writeTranscriptFile(app, settings, source.baseName, transcriptMarkdown, source.audioFile);
-			new Notice(`Transcript ready for "${source.baseName}".`);
-			logDebug("pipeline finished (transcript only)");
+			// No summary means the transcript, if kept at all, is the sole output - always its own
+			// note regardless of transcriptPlacement, which only chooses between same-note-as-summary
+			// and a dedicated file when a summary exists to place it relative to.
+			if (settings.transcribeAudio) {
+				onProgress("Saving transcript");
+				await writeTranscriptFile(app, settings, source.baseName, transcriptMarkdown, source.audioFile);
+				dedicatedTranscriptWritten = true;
+				new Notice(`Transcript ready for "${source.baseName}".`);
+			} else {
+				new Notice(`Recording processed for "${source.baseName}" - transcript and summary are both off, nothing was kept.`);
+			}
+			logDebug("pipeline finished (transcript only, or nothing kept)");
 			return;
 		}
 
@@ -162,8 +194,9 @@ export async function runTranscribeAndSummarizePipeline(
 		// paid for by the transcription request, so it shouldn't be held hostage by a summary call
 		// that might fail or be cancelled. Doing this here (rather than nested in
 		// writeIntoActiveNote/writeIntoNewNote) means the file appears as soon as it's ready instead
-		// of only after the summary succeeds.
-		if (settings.transcriptPlacement === "dedicated-file") {
+		// of only after the summary succeeds. Only when transcribeAudio is on - otherwise the raw
+		// transcript is never kept, even though it was needed internally to produce the summary.
+		if (settings.transcribeAudio && settings.transcriptPlacement === "dedicated-file") {
 			onProgress("Saving transcript");
 			await writeTranscriptFile(app, settings, source.baseName, transcriptMarkdown, source.audioFile);
 			dedicatedTranscriptWritten = true;
@@ -183,11 +216,15 @@ export async function runTranscribeAndSummarizePipeline(
 		// transcript itself goes to a separate file the user may not open right away.
 		const summaryMarkdown = `${audioLinkMarkdown}${buildSummaryMarkdown(summaryResult.summary, transcription.repetitionWarning)}`;
 
+		// Same-note insertion only includes the transcript when transcribeAudio is on - otherwise
+		// there's nothing to append, and the summary is the whole story.
+		const includeTranscriptInline = settings.transcribeAudio && settings.transcriptPlacement === "same-note";
+
 		onProgress("Saving results");
 		if (activeView) {
-			writeIntoActiveNote(activeView, settings, summaryMarkdown, transcriptMarkdown);
+			writeIntoActiveNote(activeView, summaryMarkdown, includeTranscriptInline ? transcriptMarkdown : undefined);
 		} else {
-			await writeIntoNewNote(app, settings, source.baseName, summaryMarkdown, transcriptMarkdown);
+			await writeIntoNewNote(app, settings, source.baseName, summaryMarkdown, includeTranscriptInline ? transcriptMarkdown : undefined);
 		}
 
 		new Notice(`Summary ready for "${source.baseName}".`);
@@ -314,17 +351,18 @@ function buildAudioLinkMarkdown(app: App, audioFile: TFile, sourcePath: string):
 	return `!${link}\n\n`;
 }
 
-function writeIntoActiveNote(view: MarkdownView, settings: AiTranscribeSummarySettings, summaryMarkdown: string, transcriptMarkdown: string): void {
+/** `transcriptMarkdown` is undefined whenever the raw transcript shouldn't be appended - transcribeAudio is off, or transcriptPlacement is "dedicated-file" (already written to its own file by the caller). */
+function writeIntoActiveNote(view: MarkdownView, summaryMarkdown: string, transcriptMarkdown: string | undefined): void {
 	const editor = view.editor;
-	const insertion = settings.transcriptPlacement === "same-note" ? `${summaryMarkdown}\n${transcriptMarkdown}` : summaryMarkdown;
+	const insertion = transcriptMarkdown !== undefined ? `${summaryMarkdown}\n${transcriptMarkdown}` : summaryMarkdown;
 	editor.replaceSelection(insertion);
 }
 
-async function writeIntoNewNote(app: App, settings: AiTranscribeSummarySettings, baseName: string, summaryMarkdown: string, transcriptMarkdown: string): Promise<void> {
+async function writeIntoNewNote(app: App, settings: AiTranscribeSummarySettings, baseName: string, summaryMarkdown: string, transcriptMarkdown: string | undefined): Promise<void> {
 	const folderPath = normalizePath(settings.summaryFolder);
 	await ensureFolder(app, folderPath);
 
-	const content = settings.transcriptPlacement === "same-note" ? `${summaryMarkdown}\n${transcriptMarkdown}` : summaryMarkdown;
+	const content = transcriptMarkdown !== undefined ? `${summaryMarkdown}\n${transcriptMarkdown}` : summaryMarkdown;
 	const notePath = resolveNonCollidingPath(app, folderPath, baseName);
 	await app.vault.create(notePath, content);
 }

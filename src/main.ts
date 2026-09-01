@@ -1,6 +1,6 @@
 import { App, Editor, MarkdownView, Menu, Modal, normalizePath, Notice, Plugin, setIcon, Setting, TAbstractFile, TFile, TFolder } from "obsidian";
 import { AudioRecorder, isRecordingSilent, LEVEL_BAND_COUNT, RecordingResult } from "./audio/recorder";
-import { AudioSource, formatTimestampForFilename, isAudioFile, logDebug, RequestAbortedError, runSummarizeTextPipeline, runTranscribeAndSummarizePipeline } from "./pipeline";
+import { AudioSource, formatTimestampForFilename, isAudioFile, logDebug, needsTranscription, RequestAbortedError, runSummarizeTextPipeline, runTranscribeAndSummarizePipeline } from "./pipeline";
 import { AiTranscribeSummarySettingTab, AiTranscribeSummarySettings, DEFAULT_SETTINGS } from "./settings";
 
 /** audio/webm -> webm, audio/ogg;codecs=opus -> ogg, etc. */
@@ -669,6 +669,14 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 	 * that's blank/corrupted.
 	 */
 	private async runPipelineWithSilenceCheck(source: AudioSource) {
+		// The check exists to protect the transcription API call from being wasted on a silent/dead
+		// clip - when nothing downstream (transcript, cleanup, summary) needs transcription at all,
+		// there's no such call to protect, so skip straight through.
+		if (!needsTranscription(this.settings)) {
+			await this.runPipeline(source);
+			return;
+		}
+
 		// An undecodable blob (near-empty/corrupt audio, or a genuinely unsupported format) is
 		// surfaced to the user the same way a silent recording is, rather than proceeding straight
 		// to the transcription provider - which would otherwise fail with an opaque HTTP 400.
