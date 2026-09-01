@@ -26,6 +26,28 @@ export interface RecordingResult {
 const SILENCE_RMS_THRESHOLD = 0.01;
 const SILENCE_POLL_INTERVAL_MS = 1000;
 
+/** Decodes `blob` and checks whether its overall RMS level is at/below the same threshold the in-recording silence monitor uses, i.e. whether the whole clip is effectively silent rather than just quiet. */
+export async function isRecordingSilent(blob: Blob): Promise<boolean> {
+	const audioContext = new AudioContext();
+	let buffer: AudioBuffer;
+	try {
+		buffer = await audioContext.decodeAudioData(await blob.arrayBuffer());
+	} finally {
+		await audioContext.close();
+	}
+
+	let sumSquares = 0;
+	let sampleCount = 0;
+	for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
+		const data = buffer.getChannelData(channel);
+		for (let i = 0; i < data.length; i++) sumSquares += data[i] * data[i];
+		sampleCount += data.length;
+	}
+
+	const rms = sampleCount > 0 ? Math.sqrt(sumSquares / sampleCount) : 0;
+	return rms < SILENCE_RMS_THRESHOLD;
+}
+
 /**
  * Thin wrapper around getUserMedia + MediaRecorder. Owns the media stream and
  * recorder instance for a single record/pause/resume/stop lifecycle; callers

@@ -1,6 +1,6 @@
 import { App, Editor, MarkdownView, Menu, Modal, normalizePath, Notice, Plugin, Setting, TAbstractFile, TFile, TFolder } from "obsidian";
-import { AudioRecorder, RecordingResult } from "./audio/recorder";
-import { formatTimestampForFilename, isAudioFile, logDebug, RequestAbortedError, runSummarizeTextPipeline, runTranscribeAndSummarizePipeline } from "./pipeline";
+import { AudioRecorder, isRecordingSilent, RecordingResult } from "./audio/recorder";
+import { AudioSource, formatTimestampForFilename, isAudioFile, logDebug, RequestAbortedError, runSummarizeTextPipeline, runTranscribeAndSummarizePipeline } from "./pipeline";
 import { AiTranscribeSummarySettingTab, AiTranscribeSummarySettings, DEFAULT_SETTINGS } from "./settings";
 
 /** audio/webm -> webm, audio/ogg;codecs=opus -> ogg, etc. */
@@ -120,6 +120,40 @@ class StartRecordingConfirmModal extends Modal {
 			.addButton((button) =>
 				button
 					.setButtonText("Start recording")
+					.setCta()
+					.onClick(() => {
+						this.confirmed = true;
+						this.close();
+						this.onConfirm();
+					})
+			);
+	}
+
+	onClose() {
+		this.contentEl.empty();
+		if (!this.confirmed) this.onCancel();
+	}
+}
+
+/** Shown after stop() when the recorded clip's overall RMS is at/below the silence threshold - lets the user transcribe anyway (e.g. a quiet but valid recording) instead of silently discarding it. */
+class SilentRecordingConfirmModal extends Modal {
+	private confirmed = false;
+
+	constructor(app: App, private onConfirm: () => void, private onCancel: () => void) {
+		super(app);
+	}
+
+	onOpen() {
+		this.setTitle("Recording appears to be silent");
+		this.contentEl.createEl("p", {
+			text: "No audio signal was detected in this recording. You can still transcribe and summarize it, but the result may be empty.",
+		});
+
+		new Setting(this.contentEl)
+			.addButton((button) => button.setButtonText("Discard").onClick(() => this.close()))
+			.addButton((button) =>
+				button
+					.setButtonText("Transcribe anyway")
 					.setCta()
 					.onClick(() => {
 						this.confirmed = true;
@@ -336,20 +370,14 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 	}
 
 	private async transcribeAndSummarizeFile(file: TFile): Promise<void> {
-		const { jobId, signal } = this.beginPipelineJob();
+		let blob: Blob;
 		try {
-			const blob = new Blob([await this.app.vault.readBinary(file)], { type: mimeTypeForExtension(file.extension) });
-			await runTranscribeAndSummarizePipeline(
-				this.app,
-				this.settings,
-				{ blob, mimeType: blob.type, baseName: file.basename, audioFile: file },
-				{ targetView: this.lastMarkdownView, onProgress: (status) => this.showPipelineProgress(jobId, status), signal }
-			);
+			blob = new Blob([await this.app.vault.readBinary(file)], { type: mimeTypeForExtension(file.extension) });
 		} catch (error) {
 			this.reportPipelineError("transcribe & summarize", error);
-		} finally {
-			this.endPipelineJob(jobId);
+			return;
 		}
+		await this.runPipelineWithSilenceCheck({ blob, mimeType: blob.type, baseName: file.basename, audioFile: file });
 	}
 
 	/** Logs and surfaces a pipeline failure - a user-initiated stop gets a neutral Notice instead of the usual red "failed" one. */
@@ -579,14 +607,53 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 			);
 		}
 
+		await this.runPipelineWithSilenceCheck({
+			blob: result.blob,
+			mimeType: result.mimeType,
+			baseName: savedFile?.basename ?? `meeting ${formatTimestampForFilename(new Date())}`,
+			audioFile: savedFile,
+		});
+	}
+
+	/**
+	 * Checks `source.blob` for silence before handing it to the pipeline - shared by the
+	 * live-recording flow (stopRecording) and the existing-file flow (transcribeAndSummarizeFile,
+	 * reached via the command palette or either right-click file menu), since both can end up
+	 * with a silent clip: a recording captured with no signal, or a pre-existing audio file
+	 * that's blank/corrupted.
+	 */
+	private async runPipelineWithSilenceCheck(source: AudioSource) {
+		// Best-effort: an undecodable blob (unsupported format) fails open and proceeds to the
+		// pipeline rather than blocking a recording this check simply can't evaluate.
+		let silent = false;
+		try {
+			silent = await isRecordingSilent(source.blob);
+		} catch (error) {
+			console.error("ai-transcribe-summary: silence check failed, proceeding anyway", error);
+		}
+
+		if (silent) {
+			new SilentRecordingConfirmModal(
+				this.app,
+				() => void this.runPipeline(source),
+				() => {
+					/* discarded - raw audio (if saveAudioFile is on, or the file already in the vault) is untouched */
+				}
+			).open();
+			return;
+		}
+
+		await this.runPipeline(source);
+	}
+
+	private async runPipeline(source: AudioSource) {
 		const { jobId, signal } = this.beginPipelineJob();
 		try {
-			await runTranscribeAndSummarizePipeline(
-				this.app,
-				this.settings,
-				{ blob: result.blob, mimeType: result.mimeType, baseName: savedFile?.basename ?? `meeting ${formatTimestampForFilename(new Date())}`, audioFile: savedFile },
-				{ targetView: this.lastMarkdownView, onProgress: (status) => this.showPipelineProgress(jobId, status), signal }
-			);
+			await runTranscribeAndSummarizePipeline(this.app, this.settings, source, {
+				targetView: this.lastMarkdownView,
+				onProgress: (status) => this.showPipelineProgress(jobId, status),
+				signal,
+			});
 		} catch (error) {
 			this.reportPipelineError("transcribe & summarize", error);
 		} finally {
