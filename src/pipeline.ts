@@ -221,9 +221,18 @@ export async function runTranscribeAndSummarizePipeline(
 		const includeTranscriptInline = settings.transcribeAudio && settings.transcriptPlacement === "same-note";
 
 		onProgress("Saving results");
-		if (activeView) {
-			writeIntoActiveNote(activeView, summaryMarkdown, includeTranscriptInline ? transcriptMarkdown : undefined);
+		// Re-checked here rather than trusting the activeView captured above: transcription/cleanup/summary
+		// are slow async calls, and the user may have switched away from that note (or it may just be a stale
+		// background tab) by the time we're ready to write. Inserting into a note that's no longer on screen
+		// would silently "lose" the summary from the user's point of view, so only insert inline when that
+		// note is still the one actually focused right now; otherwise fall back to a new file and say why.
+		const stillActiveView = activeView && app.workspace.getActiveViewOfType(MarkdownView) === activeView ? activeView : undefined;
+		if (stillActiveView) {
+			writeIntoActiveNote(stillActiveView, summaryMarkdown, includeTranscriptInline ? transcriptMarkdown : undefined);
 		} else {
+			if (activeView) {
+				new Notice(`Couldn't detect the note to insert into - creating a new file in "${settings.summaryFolder}" instead.`);
+			}
 			await writeIntoNewNote(app, settings, source.baseName, summaryMarkdown, includeTranscriptInline ? transcriptMarkdown : undefined);
 		}
 
@@ -319,6 +328,7 @@ async function tryWriteRescueTranscript(app: App, settings: AiTranscribeSummaryS
 		const rescuePath = resolveNonCollidingPath(app, folderPath, `${source.baseName}-raw`);
 		const audioLinkMarkdown = source.audioFile ? buildAudioLinkMarkdown(app, source.audioFile, rescuePath) : "";
 		await app.vault.create(rescuePath, `${audioLinkMarkdown}${buildTranscriptMarkdown(transcriptText)}`);
+		logDebug("rescue transcript written", { path: rescuePath });
 		return rescuePath;
 	} catch (rescueError) {
 		logDebug("rescue transcript save also failed", rescueError);
@@ -356,15 +366,18 @@ function writeIntoActiveNote(view: MarkdownView, summaryMarkdown: string, transc
 	const editor = view.editor;
 	const insertion = transcriptMarkdown !== undefined ? `${summaryMarkdown}\n${transcriptMarkdown}` : summaryMarkdown;
 	editor.replaceSelection(insertion);
+	logDebug("summary inserted into active note", { path: view.file?.path ?? null });
 }
 
-async function writeIntoNewNote(app: App, settings: AiTranscribeSummarySettings, baseName: string, summaryMarkdown: string, transcriptMarkdown: string | undefined): Promise<void> {
+async function writeIntoNewNote(app: App, settings: AiTranscribeSummarySettings, baseName: string, summaryMarkdown: string, transcriptMarkdown: string | undefined): Promise<string> {
 	const folderPath = normalizePath(settings.summaryFolder);
 	await ensureFolder(app, folderPath);
 
 	const content = transcriptMarkdown !== undefined ? `${summaryMarkdown}\n${transcriptMarkdown}` : summaryMarkdown;
 	const notePath = resolveNonCollidingPath(app, folderPath, baseName);
 	await app.vault.create(notePath, content);
+	logDebug("summary written to new note", { path: notePath });
+	return notePath;
 }
 
 /**
@@ -384,12 +397,14 @@ async function writeTranscriptFile(
 	baseName: string,
 	transcriptMarkdown: string,
 	audioFile: TFile | undefined
-): Promise<void> {
+): Promise<string> {
 	const folderPath = normalizePath(settings.transcriptFolder);
 	await ensureFolder(app, folderPath);
 	const transcriptPath = resolveNonCollidingPath(app, folderPath, `${baseName}-transcript`);
 	const audioLinkMarkdown = audioFile ? buildAudioLinkMarkdown(app, audioFile, transcriptPath) : "";
 	await app.vault.create(transcriptPath, `${audioLinkMarkdown}${transcriptMarkdown}`);
+	logDebug("transcript written to new note", { path: transcriptPath });
+	return transcriptPath;
 }
 
 /** `<folderPath>/<baseName>.md`, or the same with a timestamp appended if that path is already taken - so re-running "Transcribe & summarize" on the same audio file creates a new note instead of throwing on Vault.create(). */
