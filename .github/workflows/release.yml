@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version number (e.g., 0.2.0)"
-        required: true
+        description: "Version number (e.g., 0.2.0). Leave blank to auto-bump based on conventional commits since the last release."
+        required: false
         type: string
 
-run-name: v${{ inputs.version }}
+run-name: release ${{ inputs.version || '(auto)' }}
 
 jobs:
   release:
@@ -36,27 +36,58 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Validate version format
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Resolve release version
+        id: resolve_version
         run: |
-          if ! [[ "${{ inputs.version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          INPUT_VERSION="${{ inputs.version }}"
+          if [ -n "$INPUT_VERSION" ]; then
+            VERSION="$INPUT_VERSION"
+          else
+            LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "0.0.0")
+            COMMITS=$(git log "${LAST_TAG}..HEAD" --pretty=%s 2>/dev/null || git log --pretty=%s)
+
+            BUMP=""
+            if echo "$COMMITS" | grep -qE '^[a-z]+(\([^)]+\))?!:|BREAKING CHANGE'; then
+              BUMP="major"
+            elif echo "$COMMITS" | grep -qE '^feat(\([^)]+\))?:'; then
+              BUMP="minor"
+            elif echo "$COMMITS" | grep -qE '^fix(\([^)]+\))?:'; then
+              BUMP="patch"
+            fi
+
+            if [ -z "$BUMP" ]; then
+              echo "Error: No feat:/fix: commits since the last release, and no version was provided."
+              exit 1
+            fi
+
+            IFS=. read -r MAJOR MINOR PATCH <<< "$LAST_TAG"
+            case "$BUMP" in
+              major) VERSION="$((MAJOR + 1)).0.0" ;;
+              minor) VERSION="${MAJOR}.$((MINOR + 1)).0" ;;
+              patch) VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))" ;;
+            esac
+            echo "Auto-computed version from conventional commits: $VERSION"
+          fi
+
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Error: Version must be in format X.Y.Z (e.g., 0.2.0)"
             exit 1
           fi
 
-      - name: Check if tag already exists
-        run: |
-          if git rev-parse "${{ inputs.version }}" >/dev/null 2>&1; then
-            echo "Error: Tag ${{ inputs.version }} already exists"
+          if git rev-parse "$VERSION" >/dev/null 2>&1; then
+            echo "Error: Tag $VERSION already exists"
             exit 1
           fi
 
-      - name: Install dependencies
-        run: npm ci
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Bump version (package.json, manifest.json, versions.json)
         run: |
-          npm version ${{ inputs.version }} --no-git-tag-version --allow-same-version
-          node scripts/version-bump.mjs ${{ inputs.version }}
+          npm version ${{ steps.resolve_version.outputs.version }} --no-git-tag-version --allow-same-version
+          node scripts/version-bump.mjs ${{ steps.resolve_version.outputs.version }}
 
       - name: Build plugin
         run: npm run build
@@ -74,14 +105,14 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes to commit, skipping"
           else
-            git commit -m "chore(release): ${{ inputs.version }}"
+            git commit -m "chore(release): ${{ steps.resolve_version.outputs.version }}"
             git push origin main
           fi
 
       - name: Create and push tag
         run: |
-          git tag -a "${{ inputs.version }}" -m "Release ${{ inputs.version }}"
-          git push origin "${{ inputs.version }}"
+          git tag -a "${{ steps.resolve_version.outputs.version }}" -m "Release ${{ steps.resolve_version.outputs.version }}"
+          git push origin "${{ steps.resolve_version.outputs.version }}"
 
       - name: Generate release notes
         id: release_notes
@@ -91,7 +122,7 @@ jobs:
             const { data } = await github.rest.repos.generateReleaseNotes({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              tag_name: '${{ inputs.version }}'
+              tag_name: '${{ steps.resolve_version.outputs.version }}'
             });
             return data.body;
           result-encoding: string
@@ -99,8 +130,8 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.version }}
-          name: ${{ inputs.version }}
+          tag_name: ${{ steps.resolve_version.outputs.version }}
+          name: ${{ steps.resolve_version.outputs.version }}
           draft: false
           prerelease: false
           files: |
@@ -115,6 +146,6 @@ jobs:
         run: |
           echo "### Release Summary :rocket:" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Version:** ${{ inputs.version }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Tag:** ${{ inputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** ${{ steps.resolve_version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Tag:** ${{ steps.resolve_version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
           echo "✅ GitHub Release created with main.js, manifest.json, styles.css" >> $GITHUB_STEP_SUMMARY
