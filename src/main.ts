@@ -286,7 +286,7 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 		this.addSettingTab(new AiTranscribeSummarySettingTab(this.app, this));
 
 		this.registerEvent(this.app.workspace.on("file-menu", (menu, file) => this.onFileMenu(menu, file)));
-		this.registerNotebookNavigatorMenu();
+		this.app.workspace.onLayoutReady(() => this.registerNotebookNavigatorMenu());
 
 		this.lastMarkdownView = this.app.workspace.getActiveViewOfType(MarkdownView) ?? undefined;
 		this.registerEvent(
@@ -330,6 +330,8 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 	 * event, so onFileMenu() above never runs there. Notebook Navigator instead exposes its
 	 * own extension API (api.menus.registerFileMenu) for this exact case - hook into it when
 	 * present so our items also show up inside its navigator. No-op if it isn't installed.
+	 * Called from onLayoutReady() rather than directly in onload(), since Obsidian doesn't
+	 * guarantee plugin load order - Notebook Navigator's api may not exist yet otherwise.
 	 */
 	private registerNotebookNavigatorMenu() {
 		const nn = (this.app as unknown as { plugins?: { plugins?: Record<string, { api?: NotebookNavigatorApi }> } }).plugins?.plugins?.[
