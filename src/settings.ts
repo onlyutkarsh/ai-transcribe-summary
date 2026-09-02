@@ -56,6 +56,8 @@ export type TranscriptionProviderId = "openai" | "openrouter";
 
 export type TranscriptPlacement = "same-note" | "dedicated-file";
 
+export type SummaryPlacement = "active-note" | "dedicated-file";
+
 /** Recording bitrate in kbps. Kept as a closed set - MediaRecorder accepts arbitrary values, but only these are exposed. */
 export type AudioBitrateKbps = 32 | 64 | 128;
 
@@ -171,9 +173,12 @@ export interface AiTranscribeSummarySettings {
 	transcriptPlacement: TranscriptPlacement;
 	transcriptFolder: string;
 
-	// Output: summary. Inserted at the cursor in the active note when one is
-	// open (live recording, or a right-click retry with a markdown note still
-	// open); written into summaryFolder otherwise (no active note).
+	// Output: summary
+	/** "active-note" inserts at the cursor in the active note when one is open (live recording, or a
+	 * right-click retry with a markdown note still open), falling back to a new note in summaryFolder
+	 * when there isn't one. "dedicated-file" always writes a new note in summaryFolder, regardless of
+	 * what's open. */
+	summaryPlacement: SummaryPlacement;
 	summaryFolder: string;
 }
 
@@ -222,6 +227,7 @@ export const DEFAULT_SETTINGS: AiTranscribeSummarySettings = {
 	transcriptPlacement: "same-note",
 	transcriptFolder: "_meetings/transcripts",
 
+	summaryPlacement: "active-note",
 	summaryFolder: "_meetings",
 };
 
@@ -417,6 +423,8 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 				return settings.cleanupPrompt;
 			case "summaryFolder":
 				return settings.summaryFolder;
+			case "summaryPlacement":
+				return settings.summaryPlacement;
 			default:
 				return undefined;
 		}
@@ -535,6 +543,9 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 				break;
 			case "summaryFolder":
 				settings.summaryFolder = (value as string) || DEFAULT_SETTINGS.summaryFolder;
+				break;
+			case "summaryPlacement":
+				settings.summaryPlacement = value as SummaryPlacement;
 				break;
 			default:
 				return;
@@ -812,8 +823,21 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 					},
 				},
 				{
+					name: "Summary placement",
+					desc: "'Active note' inserts the summary at the cursor in the note that was open when recording stopped, falling back to a new note in the summary folder below when there isn't one (nothing open, or a right-click 'Transcribe & summarize' retry run without a note focused). 'Dedicated file' always writes a new note in the summary folder, regardless of what's open.",
+					visible: () => this.plugin.settings.generateSummary,
+					control: {
+						type: "dropdown",
+						key: "summaryPlacement",
+						options: {
+							"active-note": "Active note (fallback to new file)",
+							"dedicated-file": "Dedicated file",
+						},
+					},
+				},
+				{
 					name: "Summary folder",
-					desc: "Where the summary is written when there's no active note to insert it into at the cursor - nothing open, or a right-click 'Transcribe & summarize' retry run without a note focused (the new note uses the audio filename). If transcript placement above is 'Same note', the transcript follows the summary into this new note too. Not used when summary generation is off - the transcript then always goes to the transcript folder below instead.",
+					desc: "Vault folder used when summary placement is 'Dedicated file', or as the fallback when it's 'Active note' but no active note was detected (the new note uses the audio filename). If transcript placement above is 'Same note', the transcript follows the summary into this new note too. Not used when summary generation is off - the transcript then always goes to the transcript folder below instead.",
 					control: {
 						type: "folder",
 						key: "summaryFolder",

@@ -236,21 +236,17 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 		this.ribbonIconEl.addClass("ai-transcribe-summary-ribbon-icon");
 
 		this.addCommand({
-			id: "start-recording",
-			name: "Start recording",
+			id: "toggle-recording",
+			name: "Start/Stop recording",
 			checkCallback: (checking) => {
-				if (this.state !== "idle" || this.transitioning) return false;
-				if (!checking) this.requestStartRecording();
-				return true;
-			},
-		});
-
-		this.addCommand({
-			id: "stop-recording",
-			name: "Stop recording",
-			checkCallback: (checking) => {
-				if (this.state === "idle" || this.transitioning) return false;
-				if (!checking) this.requestStopRecording();
+				if (this.transitioning) return false;
+				if (!checking) {
+					if (this.state === "idle") {
+						this.requestStartRecording();
+					} else {
+						this.requestStopRecording();
+					}
+				}
 				return true;
 			},
 		});

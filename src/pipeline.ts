@@ -226,11 +226,14 @@ export async function runTranscribeAndSummarizePipeline(
 		// background tab) by the time we're ready to write. Inserting into a note that's no longer on screen
 		// would silently "lose" the summary from the user's point of view, so only insert inline when that
 		// note is still the one actually focused right now; otherwise fall back to a new file and say why.
-		const stillActiveView = activeView && app.workspace.getActiveViewOfType(MarkdownView) === activeView ? activeView : undefined;
+		// Skipped entirely when summaryPlacement is "dedicated-file" - the user has opted out of
+		// active-note insertion regardless of what's currently focused.
+		const stillActiveView =
+			settings.summaryPlacement === "active-note" && activeView && app.workspace.getActiveViewOfType(MarkdownView) === activeView ? activeView : undefined;
 		if (stillActiveView) {
 			writeIntoActiveNote(stillActiveView, summaryMarkdown, includeTranscriptInline ? transcriptMarkdown : undefined);
 		} else {
-			if (activeView) {
+			if (settings.summaryPlacement === "active-note" && activeView) {
 				new Notice(`Couldn't detect the note to insert into - creating a new file in "${settings.summaryFolder}" instead.`);
 			}
 			await writeIntoNewNote(app, settings, source.baseName, summaryMarkdown, includeTranscriptInline ? transcriptMarkdown : undefined);
