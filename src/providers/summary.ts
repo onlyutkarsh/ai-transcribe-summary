@@ -6,6 +6,8 @@ export interface SummaryRequest {
 	prompt: string;
 	/** When aborted, the provider stops waiting on/starting further requests and rejects with RequestAbortedError. */
 	signal?: AbortSignal;
+	/** Which pipeline step this call belongs to - log-only, lets shared providers (used for both cleanup and summary) label their logs correctly. Defaults to "summary" when omitted. */
+	step?: "summary" | "cleanup";
 }
 
 export interface SummaryResult {

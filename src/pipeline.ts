@@ -167,6 +167,7 @@ export async function runTranscribeAndSummarizePipeline(
 				transcript: transcriptText,
 				prompt: settings.cleanupPrompt,
 				signal,
+				step: "cleanup",
 			});
 			logDebug("cleanup finished", { durationMs: Date.now() - cleanupStartedAt, textLength: cleanupResult.summary.length });
 			transcriptText = cleanupResult.summary.trim() || transcriptText;

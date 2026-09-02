@@ -32,20 +32,21 @@ export async function summarizeLongTranscript(
 		return provider.summarize(request);
 	}
 
-	logDebug("map-reduce summary: splitting transcript", { transcriptLength: request.transcript.length, chunkCount: chunks.length });
+	const step = request.step ?? "summary";
+	logDebug(`${step}: splitting transcript for map-reduce`, { transcriptLength: request.transcript.length, chunkCount: chunks.length });
 
 	const digests: string[] = [];
 	for (let i = 0; i < chunks.length; i++) {
 		if (request.signal?.aborted) throw new RequestAbortedError();
 		onProgress(`Summarizing part ${i + 1} of ${chunks.length}`);
-		const digestResult = await provider.summarize({ transcript: chunks[i], prompt: MAP_CHUNK_PROMPT, signal: request.signal });
+		const digestResult = await provider.summarize({ transcript: chunks[i], prompt: MAP_CHUNK_PROMPT, signal: request.signal, step: request.step });
 		digests.push(digestResult.summary.trim());
 	}
 
 	if (request.signal?.aborted) throw new RequestAbortedError();
 	onProgress("Combining summary");
 	const combinedDigest = digests.map((digest, i) => `## Part ${i + 1}\n\n${digest}`).join("\n\n");
-	logDebug("map-reduce summary: combining digests", { digestCount: digests.length, combinedLength: combinedDigest.length });
+	logDebug(`${step}: combining digests for map-reduce`, { digestCount: digests.length, combinedLength: combinedDigest.length });
 
-	return provider.summarize({ transcript: combinedDigest, prompt: request.prompt, signal: request.signal });
+	return provider.summarize({ transcript: combinedDigest, prompt: request.prompt, signal: request.signal, step: request.step });
 }

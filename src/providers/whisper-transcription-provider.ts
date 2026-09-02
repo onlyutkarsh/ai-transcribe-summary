@@ -51,7 +51,7 @@ export class WhisperTranscriptionProvider implements TranscriptionProvider {
 		const signal = request.signal;
 
 		const chunked = needsChunking(request.audio);
-		logDebug("whisper: audio size", request.audio.size, "bytes, chunking:", chunked);
+		logDebug("transcribe: audio size", request.audio.size, "bytes, chunking:", chunked, "model:", this.config.apiModel);
 
 		const options = { vocabularyHints: request.vocabularyHints, language: request.language };
 
@@ -66,11 +66,11 @@ export class WhisperTranscriptionProvider implements TranscriptionProvider {
 			texts = [await this.transcribeOnePiece(piece, options, 0, signal)];
 		}
 
-		logDebug("whisper: piece count", texts.length);
+		logDebug("transcribe: piece count", texts.length);
 
 		const text = texts.join(" ").trim();
 		const repetitionWarning = hasRepetitionLoop(text);
-		logDebug("whisper: transcription complete", { textLength: text.length, repetitionWarning });
+		logDebug("transcribe: complete", { textLength: text.length, repetitionWarning });
 		return { text, repetitionWarning };
 	}
 
@@ -135,7 +135,7 @@ export class WhisperTranscriptionProvider implements TranscriptionProvider {
 
 		const url = `${this.config.baseUrl.replace(/\/$/, "")}/audio/transcriptions`;
 
-		logDebug(`whisper: uploading chunk ${index + 1}`, { bytes: piece.data.byteLength, model: this.config.apiModel });
+		logDebug(`transcribe: uploading chunk ${index + 1}`, { bytes: piece.data.byteLength, model: this.config.apiModel });
 		const startedAt = Date.now();
 		const response = await this.requestWithRetry(
 			{
@@ -148,13 +148,20 @@ export class WhisperTranscriptionProvider implements TranscriptionProvider {
 			},
 			signal
 		);
-		logDebug(`whisper: chunk ${index + 1} responded`, { status: response.status, durationMs: Date.now() - startedAt });
+		logDebug(`transcribe: chunk ${index + 1} responded`, { status: response.status, durationMs: Date.now() - startedAt, model: this.config.apiModel });
 
 		const json = response.json as WhisperResponseBody | undefined;
 
 		if (response.status >= 400) {
 			const detail = json?.error?.message ?? response.text;
-			throw new Error(`Whisper transcription failed on chunk ${index + 1} (HTTP ${response.status}): ${detail}`);
+			if (response.status === 413) {
+				throw new Error(
+					`Transcription failed on chunk ${index + 1} (HTTP 413: payload too large). ` +
+						`The "${this.config.apiModel}" model has a smaller upload limit than the ~22MB chunk size this plugin targets. ` +
+						`Try a different transcription model (e.g. "whisper-1") or lower your recording bitrate in Settings.`
+				);
+			}
+			throw new Error(`Transcription failed on chunk ${index + 1} (HTTP ${response.status}): ${detail}`);
 		}
 
 		return typeof json?.text === "string" ? json.text : "";
@@ -167,7 +174,7 @@ export class WhisperTranscriptionProvider implements TranscriptionProvider {
 			try {
 				const response = await requestUrlWithTimeout(params, CHUNK_REQUEST_TIMEOUT_MS, signal);
 				if ((response.status === 429 || response.status >= 500) && attempt < MAX_RETRIES - 1) {
-					logDebug(`whisper: request returned HTTP ${response.status} (attempt ${attempt + 1}/${MAX_RETRIES}), retrying`);
+					logDebug(`transcribe: request returned HTTP ${response.status} (attempt ${attempt + 1}/${MAX_RETRIES}), retrying`);
 					await sleep(RETRY_BASE_DELAY_MS * 2 ** attempt);
 					continue;
 				}
@@ -176,7 +183,7 @@ export class WhisperTranscriptionProvider implements TranscriptionProvider {
 				if (error instanceof RequestAbortedError) throw error;
 				lastError = error;
 				if (attempt < MAX_RETRIES - 1) {
-					logDebug(`whisper: request failed (attempt ${attempt + 1}/${MAX_RETRIES}), retrying`, error);
+					logDebug(`transcribe: request failed (attempt ${attempt + 1}/${MAX_RETRIES}), retrying`, error);
 					await sleep(RETRY_BASE_DELAY_MS * 2 ** attempt);
 				}
 			}

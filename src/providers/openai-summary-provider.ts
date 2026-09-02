@@ -40,8 +40,9 @@ export class OpenAiSummaryProvider implements SummaryProvider {
 			throw new Error(`${SUMMARY_PROVIDER_SCHEMA[this.id].label} API key is not set. Add it in Settings under Summary generation.`);
 		}
 
+		const step = request.step ?? "summary";
 		const url = `${this.config.baseUrl.replace(/\/$/, "")}/chat/completions`;
-		logDebug(`${this.id} summary: requesting`, { model: this.config.model, transcriptLength: request.transcript.length });
+		logDebug(`${step}: requesting`, { provider: this.id, model: this.config.model, transcriptLength: request.transcript.length });
 		const startedAt = Date.now();
 		const response = await this.requestWithRetry(
 			{
@@ -59,9 +60,10 @@ export class OpenAiSummaryProvider implements SummaryProvider {
 					],
 				}),
 			},
-			request.signal
+			request.signal,
+			step
 		);
-		logDebug(`${this.id} summary: responded`, { status: response.status, durationMs: Date.now() - startedAt });
+		logDebug(`${step}: responded`, { status: response.status, durationMs: Date.now() - startedAt });
 
 		const json = response.json as ChatCompletionsResponseBody | undefined;
 
@@ -79,13 +81,13 @@ export class OpenAiSummaryProvider implements SummaryProvider {
 	}
 
 	/** Retries on thrown errors (network failures) and on HTTP 429/5xx responses (rate limits, transient server errors) - anything else, including a user-initiated abort, is returned/thrown as-is for the caller to handle. */
-	private async requestWithRetry(params: RequestUrlParam, signal: AbortSignal | undefined): Promise<RequestUrlResponse> {
+	private async requestWithRetry(params: RequestUrlParam, signal: AbortSignal | undefined, step: "summary" | "cleanup"): Promise<RequestUrlResponse> {
 		let lastError: unknown;
 		for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
 			try {
 				const response = await requestUrlWithTimeout(params, SUMMARY_REQUEST_TIMEOUT_MS, signal);
 				if ((response.status === 429 || response.status >= 500) && attempt < MAX_RETRIES - 1) {
-					logDebug(`${this.id} summary: request returned HTTP ${response.status} (attempt ${attempt + 1}/${MAX_RETRIES}), retrying`);
+					logDebug(`${step}: request returned HTTP ${response.status} (attempt ${attempt + 1}/${MAX_RETRIES}), retrying`);
 					await sleep(RETRY_BASE_DELAY_MS * 2 ** attempt);
 					continue;
 				}
@@ -94,7 +96,7 @@ export class OpenAiSummaryProvider implements SummaryProvider {
 				if (error instanceof RequestAbortedError) throw error;
 				lastError = error;
 				if (attempt < MAX_RETRIES - 1) {
-					logDebug(`${this.id} summary: request failed (attempt ${attempt + 1}/${MAX_RETRIES}), retrying`, error);
+					logDebug(`${step}: request failed (attempt ${attempt + 1}/${MAX_RETRIES}), retrying`, error);
 					await sleep(RETRY_BASE_DELAY_MS * 2 ** attempt);
 				}
 			}
