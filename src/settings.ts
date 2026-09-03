@@ -837,7 +837,7 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 				},
 				{
 					name: "Summary folder",
-					desc: "Vault folder used when summary placement is 'Dedicated file', or as the fallback when it's 'Active note' but no active note was detected (the new note uses the audio filename). If transcript placement above is 'Same note', the transcript follows the summary into this new note too. Not used when summary generation is off - the transcript then always goes to the transcript folder below instead.",
+					desc: "Vault folder used when summary placement is 'Dedicated file', or as the fallback when it's 'Active note' but no active note was detected (the new note is named \"<audio file name>-summary\"). If transcript placement above is 'Same note', the transcript follows the summary into this new note too. Not used when summary generation is off - the transcript then always goes to the transcript folder below instead.",
 					control: {
 						type: "folder",
 						key: "summaryFolder",

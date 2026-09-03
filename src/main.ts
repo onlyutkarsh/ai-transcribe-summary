@@ -1,6 +1,16 @@
 import { App, Editor, MarkdownView, Menu, Modal, normalizePath, Notice, Plugin, setIcon, Setting, TAbstractFile, TFile, TFolder } from "obsidian";
 import { AudioRecorder, isRecordingSilent, LEVEL_BAND_COUNT, RecordingResult } from "./audio/recorder";
-import { AudioSource, formatTimestampForFilename, isAudioFile, logDebug, needsTranscription, RequestAbortedError, runSummarizeTextPipeline, runTranscribeAndSummarizePipeline } from "./pipeline";
+import {
+	AudioSource,
+	formatTimestampForFilename,
+	isAudioFile,
+	logDebug,
+	needsTranscription,
+	RequestAbortedError,
+	resolveNonCollidingPathWithExtension,
+	runSummarizeTextPipeline,
+	runTranscribeAndSummarizePipeline,
+} from "./pipeline";
 import { AiTranscribeSummarySettingTab, AiTranscribeSummarySettings, DEFAULT_SETTINGS } from "./settings";
 
 /** audio/webm -> webm, audio/ogg;codecs=opus -> ogg, etc. */
@@ -733,7 +743,9 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 		}
 
 		const extension = extensionForMimeType(result.mimeType);
-		const filePath = normalizePath(`${folderPath}/meeting ${formatTimestampForFilename(new Date())}.${extension}`);
+		const now = new Date();
+		const fileName = formatTimestampForFilename(now);
+		const filePath = resolveNonCollidingPathWithExtension(this.app, folderPath, fileName, extension);
 
 		try {
 			const arrayBuffer = await result.blob.arrayBuffer();

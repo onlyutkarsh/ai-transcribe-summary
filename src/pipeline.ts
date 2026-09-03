@@ -378,7 +378,7 @@ async function writeIntoNewNote(app: App, settings: AiTranscribeSummarySettings,
 	await ensureFolder(app, folderPath);
 
 	const content = transcriptMarkdown !== undefined ? `${summaryMarkdown}\n${transcriptMarkdown}` : summaryMarkdown;
-	const notePath = resolveNonCollidingPath(app, folderPath, baseName);
+	const notePath = resolveNonCollidingPath(app, folderPath, `${baseName}-summary`);
 	await app.vault.create(notePath, content);
 	logDebug("summary written to new note", { path: notePath });
 	return notePath;
@@ -388,12 +388,10 @@ async function writeIntoNewNote(app: App, settings: AiTranscribeSummarySettings,
  * Writes the dedicated transcript file. When an audio file is known, prefixes
  * an embedded link to it (playable inline) - resolved against this file's own
  * path so the transcript stays self-contained and playable even when opened
- * on its own, without needing the summary note that links to it. Suffixed
- * with "-transcript" so it doesn't collide with (or get confused for) the
- * summary note when transcriptFolder and summaryFolder point at the same
- * place - without this, both would resolve to the same "<baseName>.md" path
- * and the collision fallback would silently timestamp-suffix whichever one
- * is written second.
+ * on its own, without needing the summary note that links to it. Always
+ * suffixed with "-transcript" (and the summary note with "-summary") so the
+ * two never collide even when transcriptFolder and summaryFolder point at the
+ * same place.
  */
 async function writeTranscriptFile(
 	app: App,
@@ -412,12 +410,21 @@ async function writeTranscriptFile(
 }
 
 /** `<folderPath>/<baseName>.md`, or the same with a timestamp appended if that path is already taken - so re-running "Transcribe & summarize" on the same audio file creates a new note instead of throwing on Vault.create(). */
-function resolveNonCollidingPath(app: App, folderPath: string, baseName: string): string {
+export function resolveNonCollidingPath(app: App, folderPath: string, baseName: string): string {
 	const notePath = normalizePath(`${folderPath}/${baseName}.md`);
 	if (!app.vault.getAbstractFileByPath(notePath)) {
 		return notePath;
 	}
 	return normalizePath(`${folderPath}/${baseName} ${formatTimestampForFilename(new Date())}.md`);
+}
+
+/** Same collision-avoidance as resolveNonCollidingPath, but for an arbitrary extension (used for saved audio recordings) rather than always ".md". A custom file-name template without a time component makes a same-second collision much more likely than the old fixed "meeting <timestamp>" scheme did, so this is worth having even though it wasn't needed before. */
+export function resolveNonCollidingPathWithExtension(app: App, folderPath: string, baseName: string, extension: string): string {
+	const filePath = normalizePath(`${folderPath}/${baseName}.${extension}`);
+	if (!app.vault.getAbstractFileByPath(filePath)) {
+		return filePath;
+	}
+	return normalizePath(`${folderPath}/${baseName} ${formatTimestampForFilename(new Date())}.${extension}`);
 }
 
 async function ensureFolder(app: App, folderPath: string): Promise<void> {
