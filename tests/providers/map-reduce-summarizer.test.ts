@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { summarizeLongTranscript } from "../../src/providers/map-reduce-summarizer";
+import { SUMMARY_CHUNK_THRESHOLD_CHARS } from "../../src/providers/transcript-splitter";
 import { SummaryProvider, SummaryRequest, SummaryResult } from "../../src/providers/summary";
 
 function fakeProvider(summarize: (request: SummaryRequest) => Promise<SummaryResult>): SummaryProvider {
@@ -19,7 +20,8 @@ describe("summarizeLongTranscript", () => {
 	});
 
 	it("map-reduces a long transcript: one call per chunk plus one final reduce call using the user's prompt", async () => {
-		const longTranscript = Array.from({ length: 10 }, (_, i) => `Paragraph ${i}.`.repeat(2000)).join("\n\n");
+		const paragraphChars = Math.ceil(SUMMARY_CHUNK_THRESHOLD_CHARS / 5);
+		const longTranscript = Array.from({ length: 10 }, (_, i) => `Paragraph ${i}.`.repeat(paragraphChars / "Paragraph 0.".length)).join("\n\n");
 		const calls: SummaryRequest[] = [];
 		const summarize = vi.fn(async (request: SummaryRequest): Promise<SummaryResult> => {
 			calls.push(request);

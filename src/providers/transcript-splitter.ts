@@ -1,5 +1,16 @@
-/** Above this length a transcript is map-reduced (per-chunk digest, then one final summarize over the digests) instead of sent as a single message - long transcripts risk exceeding the model's context window and lose quality when key points are buried mid-input. ~45K chars is a conservative ~11-12K token budget, safely under even small-context models once the prompt and output are accounted for. */
-export const SUMMARY_CHUNK_THRESHOLD_CHARS = 45_000;
+/**
+ * Above this length a transcript is map-reduced (per-chunk digest, then one
+ * final summarize over the digests) instead of sent as a single message.
+ * Every summary provider here (OpenAI, OpenRouter, Gemini) is a cloud API
+ * with a large context window, so this is sized for that - ~350K chars is
+ * roughly an 85-90K token budget, comfortably inside even the smallest
+ * commonly-used cloud model context (128K), leaving headroom for the prompt
+ * and output. Map-reduce only kicks in for genuinely marathon transcripts;
+ * splitting a normal-length one costs extra sequential round-trips (map
+ * calls + a reduce call) for no quality benefit when it would've fit in one
+ * request anyway.
+ */
+export const SUMMARY_CHUNK_THRESHOLD_CHARS = 350_000;
 
 /**
  * Splits `transcript` into chunks no larger than `maxChunkChars`, breaking at
