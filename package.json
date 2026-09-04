@@ -1,6 +1,6 @@
 {
 	"name": "ai-transcribe-summary",
-	"version": "1.4.2",
+	"version": "1.4.3",
 	"description": "Record meetings, transcribe reliably past size/silence failure modes, and produce a structured summary alongside the full transcript.",
 	"main": "main.js",
 	"scripts": {
