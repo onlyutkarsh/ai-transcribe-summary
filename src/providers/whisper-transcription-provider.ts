@@ -3,7 +3,7 @@ import { chunkAtSilence, needsChunking } from "../audio/chunker";
 import { logDebug } from "../log";
 import { encodeMultipartFormData } from "./multipart";
 import { hasRepetitionLoop } from "./repetition-detector";
-import { RequestAbortedError, requestUrlWithTimeout } from "./request-timeout";
+import { RequestAbortedError, RequestTimeoutError, requestUrlWithTimeout } from "./request-timeout";
 import { TranscriptionProvider, TranscriptionProviderId, TranscriptionRequest, TranscriptionResult } from "./transcription";
 
 export interface WhisperProviderConfig {
@@ -21,8 +21,8 @@ interface WhisperResponseBody {
 
 const MAX_RETRIES = 3;
 const RETRY_BASE_DELAY_MS = 1000;
-/** Chunk uploads should complete well within this; a stalled connection must not hang the pipeline forever. */
-const CHUNK_REQUEST_TIMEOUT_MS = 120_000;
+/** A stalled connection must not hang the pipeline forever, but a timeout is final (see RequestTimeoutError), so this leaves room for a ~22MB upload on a slow uplink. */
+const CHUNK_REQUEST_TIMEOUT_MS = 300_000;
 /** Chunk uploads in flight at once - bounded rather than unbounded so memory (each chunk's encoded WAV bytes held until its request completes) and provider rate-limit exposure stay modest on meetings with many chunks. */
 const MAX_CONCURRENT_CHUNK_UPLOADS = 3;
 
@@ -167,7 +167,7 @@ export class WhisperTranscriptionProvider implements TranscriptionProvider {
 		return typeof json?.text === "string" ? json.text : "";
 	}
 
-	/** Retries on thrown errors (network failures) and on HTTP 429/5xx responses (rate limits, transient server errors) - anything else, including a user-initiated abort, is returned/thrown as-is for the caller to handle. */
+	/** Retries on thrown errors (network failures) and on HTTP 429/5xx responses (rate limits, transient server errors) - anything else, including a user-initiated abort or our own timeout, is returned/thrown as-is for the caller to handle. */
 	private async requestWithRetry(params: RequestUrlParam, signal: AbortSignal | undefined): Promise<RequestUrlResponse> {
 		let lastError: unknown;
 		for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
@@ -180,7 +180,7 @@ export class WhisperTranscriptionProvider implements TranscriptionProvider {
 				}
 				return response;
 			} catch (error) {
-				if (error instanceof RequestAbortedError) throw error;
+				if (error instanceof RequestAbortedError || error instanceof RequestTimeoutError) throw error;
 				lastError = error;
 				if (attempt < MAX_RETRIES - 1) {
 					logDebug(`transcribe: request failed (attempt ${attempt + 1}/${MAX_RETRIES}), retrying`, error);

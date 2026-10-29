@@ -9,6 +9,18 @@ export class RequestAbortedError extends Error {
 }
 
 /**
+ * Thrown when our own timer gives up on a request. Callers must not retry it: requestUrl can't
+ * cancel the in-flight request, so the provider is still processing (and billing) it - a retry
+ * would pay for the same work again while the first attempt runs on unobserved.
+ */
+export class RequestTimeoutError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "RequestTimeoutError";
+	}
+}
+
+/**
  * requestUrl has no built-in timeout or cancellation, so a stalled connection (dead socket, proxy
  * that never closes, provider hang) leaves the awaiting call - and the whole pipeline - stuck
  * forever with nothing to stop it. This races the request against a timer and, if given, an
@@ -29,7 +41,7 @@ export function requestUrlWithTimeout(params: RequestUrlParam, timeoutMs: number
 		};
 
 		const timer = window.setTimeout(() => {
-			settle(() => reject(new Error(`Request to ${params.url} timed out after ${Math.round(timeoutMs / 1000)}s`)));
+			settle(() => reject(new RequestTimeoutError(`Request to ${params.url} timed out after ${Math.round(timeoutMs / 1000)}s`)));
 		}, timeoutMs);
 
 		const onAbort = () => settle(() => reject(new RequestAbortedError()));

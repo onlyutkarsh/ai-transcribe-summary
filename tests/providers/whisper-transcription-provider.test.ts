@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { RequestTimeoutError } from "../../src/providers/request-timeout";
 import { WhisperTranscriptionProvider } from "../../src/providers/whisper-transcription-provider";
 
 const { requestUrlMock } = vi.hoisted(() => ({ requestUrlMock: vi.fn() }));
@@ -33,6 +34,7 @@ function deferred<T>() {
 
 beforeEach(() => {
 	requestUrlMock.mockReset();
+	vi.useRealTimers();
 });
 
 describe("WhisperTranscriptionProvider concurrent chunk uploads", () => {
@@ -90,5 +92,21 @@ describe("WhisperTranscriptionProvider concurrent chunk uploads", () => {
 		await resultPromise;
 		expect(maxInFlight).toBeLessThanOrEqual(3);
 		expect(maxInFlight).toBeGreaterThan(1); // sanity check that it actually ran concurrently, not sequentially
+	});
+});
+
+describe("WhisperTranscriptionProvider retry", () => {
+	it("does not retry a chunk upload after its own timeout, since the timed-out upload is still billed", async () => {
+		vi.useFakeTimers();
+		requestUrlMock.mockReturnValue(new Promise(() => {}));
+
+		const provider = new WhisperTranscriptionProvider("openai", { apiKey: "key", baseUrl: "https://api.openai.com/v1", apiModel: "whisper-1" });
+		const resultPromise = provider.transcribe({ audio: fakeChunkedBlob(1), mimeType: "audio/webm", vocabularyHints: "", language: "" });
+		const assertion = expect(resultPromise).rejects.toBeInstanceOf(RequestTimeoutError);
+
+		await vi.runAllTimersAsync();
+		await assertion;
+
+		expect(requestUrlMock).toHaveBeenCalledTimes(1);
 	});
 });

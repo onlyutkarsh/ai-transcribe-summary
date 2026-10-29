@@ -1,11 +1,11 @@
 import { RequestUrlParam, RequestUrlResponse } from "obsidian";
 import { logDebug } from "../log";
-import { RequestAbortedError, requestUrlWithTimeout } from "./request-timeout";
+import { RequestAbortedError, RequestTimeoutError, requestUrlWithTimeout } from "./request-timeout";
 import { SUMMARY_PROVIDER_SCHEMA, type SummaryProviderId } from "../settings";
 import { SummaryProvider, SummaryRequest, SummaryRequestTooLargeError, SummaryResult } from "./summary";
 
-/** Summary requests can legitimately take a while on long transcripts, but must not hang forever. */
-const SUMMARY_REQUEST_TIMEOUT_MS = 120_000;
+/** Generous because a timeout is final (see RequestTimeoutError) - a long transcript can legitimately take minutes, and giving up early would throw away a request that is billed anyway. */
+const SUMMARY_REQUEST_TIMEOUT_MS = 300_000;
 const MAX_RETRIES = 3;
 const RETRY_BASE_DELAY_MS = 1000;
 
@@ -91,7 +91,7 @@ export class OpenAiSummaryProvider implements SummaryProvider {
 		return { summary };
 	}
 
-	/** Retries on thrown errors (network failures) and on HTTP 429/5xx responses (rate limits, transient server errors) - anything else, including a user-initiated abort, is returned/thrown as-is for the caller to handle. */
+	/** Retries on thrown errors (network failures) and on HTTP 429/5xx responses (rate limits, transient server errors) - anything else, including a user-initiated abort or our own timeout, is returned/thrown as-is for the caller to handle. */
 	private async requestWithRetry(params: RequestUrlParam, signal: AbortSignal | undefined, step: "summary" | "cleanup"): Promise<RequestUrlResponse> {
 		let lastError: unknown;
 		for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
@@ -104,7 +104,7 @@ export class OpenAiSummaryProvider implements SummaryProvider {
 				}
 				return response;
 			} catch (error) {
-				if (error instanceof RequestAbortedError) throw error;
+				if (error instanceof RequestAbortedError || error instanceof RequestTimeoutError) throw error;
 				lastError = error;
 				if (attempt < MAX_RETRIES - 1) {
 					logDebug(`${step}: request failed (attempt ${attempt + 1}/${MAX_RETRIES}), retrying`, error);

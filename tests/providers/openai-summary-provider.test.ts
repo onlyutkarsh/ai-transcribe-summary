@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { OpenAiSummaryProvider } from "../../src/providers/openai-summary-provider";
+import { RequestTimeoutError } from "../../src/providers/request-timeout";
 
 const { requestUrlMock } = vi.hoisted(() => ({ requestUrlMock: vi.fn() }));
 
@@ -61,6 +62,32 @@ describe("OpenAiSummaryProvider retry", () => {
 		await assertion;
 
 		expect(requestUrlMock).toHaveBeenCalledTimes(3);
+	});
+
+	it("does not retry after its own timeout, since the timed-out request is still billed", async () => {
+		vi.useFakeTimers();
+		requestUrlMock.mockReturnValue(new Promise(() => {}));
+
+		const resultPromise = makeProvider().summarize({ transcript: "hello world", prompt: "Summarize" });
+		const assertion = expect(resultPromise).rejects.toBeInstanceOf(RequestTimeoutError);
+
+		await vi.runAllTimersAsync();
+		await assertion;
+
+		expect(requestUrlMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("retries on network failures", async () => {
+		vi.useFakeTimers();
+		requestUrlMock
+			.mockRejectedValueOnce(new Error("net::ERR_CONNECTION_RESET"))
+			.mockResolvedValueOnce({ status: 200, json: { choices: [{ message: { content: "Summary text" } }] }, text: "" });
+
+		const resultPromise = makeProvider().summarize({ transcript: "hello world", prompt: "Summarize" });
+
+		await vi.runAllTimersAsync();
+		expect((await resultPromise).summary).toBe("Summary text");
+		expect(requestUrlMock).toHaveBeenCalledTimes(2);
 	});
 
 	it("does not retry on non-retryable errors (e.g. HTTP 400)", async () => {

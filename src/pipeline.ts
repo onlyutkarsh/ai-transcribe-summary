@@ -1,6 +1,7 @@
 import { App, Editor, MarkdownView, normalizePath, Notice, TFile, TFolder } from "obsidian";
 import { logDebug } from "./log";
 import { createSummaryProvider, createTranscriptionProvider, resolveSummaryApiKey } from "./providers/factory";
+import { cleanUpTranscript } from "./providers/chunked-cleanup";
 import { summarizeLongTranscript } from "./providers/map-reduce-summarizer";
 import { RequestAbortedError } from "./providers/request-timeout";
 import { AiTranscribeSummarySettings, transcriptionKeyReuseTarget } from "./settings";
@@ -150,10 +151,10 @@ export async function runTranscribeAndSummarizePipeline(
 	// transcript that already cost a real transcription API call to produce. Catch it, save the
 	// raw transcript immediately so that cost isn't wasted, and tell the user where it landed
 	// instead of just surfacing the underlying error.
-	// Tracks whether the dedicated-file transcript write below actually completed - the rescue
-	// path in the catch block uses this (rather than re-deriving it from settings) so it isn't
-	// skipped when a failure happens before that write runs, e.g. during cleanup.
-	let dedicatedTranscriptWritten = false;
+	// Set once the dedicated-file transcript write below actually completes - the rescue path in
+	// the catch block uses this (rather than re-deriving it from settings) so it isn't skipped
+	// when a failure happens before that write runs, e.g. during cleanup.
+	let dedicatedTranscriptPath: string | undefined;
 	try {
 		let transcriptText = transcription.text;
 		if (settings.cleanupTranscript) {
@@ -163,14 +164,8 @@ export async function runTranscribeAndSummarizePipeline(
 			onProgress("Cleaning up transcript");
 			new Notice(`Cleaning up transcript for "${source.baseName}"...`);
 			const cleanupStartedAt = Date.now();
-			const cleanupResult = await cleanupProvider.summarize({
-				transcript: transcriptText,
-				prompt: settings.cleanupPrompt,
-				signal,
-				step: "cleanup",
-			});
-			logDebug("cleanup finished", { durationMs: Date.now() - cleanupStartedAt, textLength: cleanupResult.summary.length });
-			transcriptText = cleanupResult.summary.trim() || transcriptText;
+			transcriptText = await cleanUpTranscript(cleanupProvider, { transcript: transcriptText, prompt: settings.cleanupPrompt, signal, step: "cleanup" }, onProgress);
+			logDebug("cleanup finished", { durationMs: Date.now() - cleanupStartedAt, textLength: transcriptText.length });
 		}
 
 		const transcriptMarkdown = buildTranscriptMarkdown(transcriptText);
@@ -181,8 +176,7 @@ export async function runTranscribeAndSummarizePipeline(
 			// and a dedicated file when a summary exists to place it relative to.
 			if (settings.transcribeAudio) {
 				onProgress("Saving transcript");
-				await writeTranscriptFile(app, settings, source.baseName, transcriptMarkdown, source.audioFile);
-				dedicatedTranscriptWritten = true;
+				dedicatedTranscriptPath = await writeTranscriptFile(app, settings, source.baseName, transcriptMarkdown, source.audioFile);
 				new Notice(`Transcript ready for "${source.baseName}".`);
 			} else {
 				new Notice(`Recording processed for "${source.baseName}" - transcript and summary are both off, nothing was kept.`);
@@ -199,8 +193,7 @@ export async function runTranscribeAndSummarizePipeline(
 		// transcript is never kept, even though it was needed internally to produce the summary.
 		if (settings.transcribeAudio && settings.transcriptPlacement === "dedicated-file") {
 			onProgress("Saving transcript");
-			await writeTranscriptFile(app, settings, source.baseName, transcriptMarkdown, source.audioFile);
-			dedicatedTranscriptWritten = true;
+			dedicatedTranscriptPath = await writeTranscriptFile(app, settings, source.baseName, transcriptMarkdown, source.audioFile);
 		}
 
 		const summaryProvider = createSummaryProvider(settings);
@@ -247,7 +240,7 @@ export async function runTranscribeAndSummarizePipeline(
 		logDebug(cancelled ? "pipeline cancelled after transcription, saving raw transcript" : "pipeline failed after transcription, saving raw transcript", error);
 		// If the dedicated-file transcript was already written above before the failure, it's
 		// already safe - don't also write a rescue copy alongside it.
-		const rescuePath = dedicatedTranscriptWritten ? undefined : await tryWriteRescueTranscript(app, settings, source, transcription.text);
+		const rescuePath = dedicatedTranscriptPath ? undefined : await tryWriteRescueTranscript(app, settings, source, transcription.text);
 
 		if (cancelled) {
 			throw new RequestAbortedError(
@@ -255,10 +248,14 @@ export async function runTranscribeAndSummarizePipeline(
 			);
 		}
 
+		// Points at "Summarize note" on the saved transcript rather than re-running "Transcribe &
+		// summarize" - that would send the whole recording to the transcription API again, paying a
+		// second time for a transcript that already exists.
 		const message = error instanceof Error ? error.message : String(error);
+		const savedTranscriptPath = rescuePath ?? dedicatedTranscriptPath;
 		throw new Error(
-			rescuePath
-				? `${message}\n\nThe transcript was already produced and has been saved to "${rescuePath}" so it isn't lost. Fix the issue above, then re-run "Transcribe & summarize" on the audio file - or use the saved transcript directly.`
+			savedTranscriptPath
+				? `${message}\n\nThe transcript was already produced and has been saved to "${savedTranscriptPath}" so it isn't lost. Once the issue above is fixed, open that note and run "Summarize note" to get the summary - re-running "Transcribe & summarize" on the audio file would transcribe it again from scratch.`
 				: message,
 			{ cause: error }
 		);
