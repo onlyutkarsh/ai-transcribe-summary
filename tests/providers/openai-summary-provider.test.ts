@@ -71,4 +71,21 @@ describe("OpenAiSummaryProvider retry", () => {
 
 		expect(requestUrlMock).toHaveBeenCalledTimes(1);
 	});
+
+	it("identifies context-limit errors for map-reduce fallback", async () => {
+		requestUrlMock.mockResolvedValueOnce({
+			status: 400,
+			json: { error: { code: "context_length_exceeded", message: "maximum context length exceeded" } },
+			text: "",
+		});
+
+		await expect(makeProvider().summarize({ transcript: "hello world", prompt: "Summarize" })).rejects.toThrow(/exceeds the model's input limit/);
+		expect(requestUrlMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("identifies HTTP 413 as an oversized request", async () => {
+		requestUrlMock.mockResolvedValueOnce({ status: 413, json: { error: { message: "request too large" } }, text: "" });
+
+		await expect(makeProvider().summarize({ transcript: "hello world", prompt: "Summarize" })).rejects.toThrow(/exceeds the model's input limit/);
+	});
 });

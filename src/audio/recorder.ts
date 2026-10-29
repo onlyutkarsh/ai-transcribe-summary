@@ -1,3 +1,4 @@
+import { logDebug } from "../log";
 import type { AudioBitrateKbps } from "../settings";
 
 /** First supported mimeType wins - Opus is efficient at low bitrates (good fit for the 32kbps default). */
@@ -36,8 +37,16 @@ export interface RecordingResult {
 }
 
 const SILENCE_RMS_THRESHOLD = 0.01;
-/** Silence auto-stop and dead-mic detection only need to sample every so often; ~10/s is plenty and keeps that accumulation logic on a wall-clock cadence independent of the animation frame rate. */
+/**
+ * Silence auto-stop and dead-mic detection only need to sample every so often. This is only
+ * the *requested* cadence: Chromium throttles timers in background/occluded windows (to 1/s,
+ * or 1/min under intensive throttling) - the normal case while the meeting app has focus - so
+ * the poll measures real elapsed time per tick rather than assuming this interval elapsed.
+ */
 const SILENCE_POLL_INTERVAL_MS = 100;
+/** Max AnalyserNode window (~0.7s at 44.1/48kHz): each sparse poll then reads a level averaged over a meaningful stretch of audio, so a single click or tap doesn't reset minutes of accumulated silence. */
+const SILENCE_ANALYSER_FFT_SIZE = 32768;
+const SILENCE_DEBUG_LOG_INTERVAL_MS = 10_000;
 /**
  * If no input above SILENCE_RMS_THRESHOLD is observed within this long after starting,
  * the mic is very likely not actually delivering audio (a stuck device/driver, rather than
@@ -124,6 +133,7 @@ export class AudioRecorder {
 	private levelAnimationId: number | undefined;
 	private silentMsAccumulated = 0;
 	private unpausedMsSinceStart = 0;
+	private lastSilencePollAt = 0;
 	private deadMicChecked = false;
 	private anySignalSeen = false;
 	private paused = false;
@@ -181,6 +191,7 @@ export class AudioRecorder {
 		this.recorder?.resume();
 		this.paused = false;
 		this.silentMsAccumulated = 0;
+		this.lastSilencePollAt = Date.now();
 	}
 
 	/** Stops the recorder and releases the mic. Resolves once the final chunk has been flushed. */
@@ -245,21 +256,32 @@ export class AudioRecorder {
 		source.connect(analyser);
 		this.analyser = analyser;
 
-		this.startSilencePoll(analyser, options);
+		// Separate from the visualizer's analyser so the silence window can be much longer
+		// without slowing the ribbon bars' response.
+		const silenceAnalyser = audioContext.createAnalyser();
+		silenceAnalyser.fftSize = SILENCE_ANALYSER_FFT_SIZE;
+		source.connect(silenceAnalyser);
+
+		this.startSilencePoll(silenceAnalyser, options);
 		if (options.onLevel) this.startLevelAnimation(audioContext, analyser, options.onLevel);
 	}
 
-	/** Drives dead-mic detection and, if configured, silence auto-stop - both measured in wall-clock ms, independent of the visualizer's animation-frame cadence. */
+	/** Drives dead-mic detection and, if configured, silence auto-stop - both measured in wall-clock ms, independent of the visualizer's animation-frame cadence and of timer throttling. */
 	private startSilencePoll(analyser: AnalyserNode, options: AudioRecorderOptions): void {
 		this.silentMsAccumulated = 0;
 		this.unpausedMsSinceStart = 0;
 		this.deadMicChecked = false;
 		this.anySignalSeen = false;
+		this.lastSilencePollAt = Date.now();
+		let lastDebugLogAt = this.lastSilencePollAt;
 
 		const silenceThresholdMs = options.silenceAutoStopMinutes * 60 * 1000;
 		const data = new Float32Array(analyser.fftSize);
 
 		this.silencePollId = window.setInterval(() => {
+			const now = Date.now();
+			const elapsedMs = now - this.lastSilencePollAt;
+			this.lastSilencePollAt = now;
 			if (this.paused) return;
 
 			analyser.getFloatTimeDomainData(data);
@@ -268,7 +290,7 @@ export class AudioRecorder {
 			const rms = Math.sqrt(sumSquares / data.length);
 
 			if (rms >= SILENCE_RMS_THRESHOLD) this.anySignalSeen = true;
-			this.unpausedMsSinceStart += SILENCE_POLL_INTERVAL_MS;
+			this.unpausedMsSinceStart += elapsedMs;
 			if (!this.deadMicChecked && this.unpausedMsSinceStart >= DEAD_MIC_GRACE_MS) {
 				this.deadMicChecked = true;
 				if (!this.anySignalSeen) options.onDeadMic?.();
@@ -276,13 +298,19 @@ export class AudioRecorder {
 
 			if (silenceThresholdMs > 0) {
 				if (rms < SILENCE_RMS_THRESHOLD) {
-					this.silentMsAccumulated += SILENCE_POLL_INTERVAL_MS;
-					if (this.silentMsAccumulated >= silenceThresholdMs) {
-						this.stopLevelMonitor();
-						options.onSilenceTimeout();
-					}
+					this.silentMsAccumulated += elapsedMs;
 				} else {
 					this.silentMsAccumulated = 0;
+				}
+
+				if (now - lastDebugLogAt >= SILENCE_DEBUG_LOG_INTERVAL_MS) {
+					lastDebugLogAt = now;
+					logDebug(`silence monitor: level ${rms.toFixed(4)} (threshold ${SILENCE_RMS_THRESHOLD}), silent for ${Math.round(this.silentMsAccumulated / 1000)}s`);
+				}
+
+				if (this.silentMsAccumulated >= silenceThresholdMs) {
+					this.stopLevelMonitor();
+					options.onSilenceTimeout();
 				}
 			}
 		}, SILENCE_POLL_INTERVAL_MS);

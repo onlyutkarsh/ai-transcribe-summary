@@ -15,6 +15,13 @@ export interface SummaryResult {
 	summary: string;
 }
 
+export class SummaryRequestTooLargeError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "SummaryRequestTooLargeError";
+	}
+}
+
 /** One implementation per SummaryProviderId (openai, openrouter, gemini). */
 export interface SummaryProvider {
 	readonly id: SummaryProviderId;

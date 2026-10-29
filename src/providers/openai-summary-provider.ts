@@ -2,7 +2,7 @@ import { RequestUrlParam, RequestUrlResponse } from "obsidian";
 import { logDebug } from "../log";
 import { RequestAbortedError, requestUrlWithTimeout } from "./request-timeout";
 import { SUMMARY_PROVIDER_SCHEMA, type SummaryProviderId } from "../settings";
-import { SummaryProvider, SummaryRequest, SummaryResult } from "./summary";
+import { SummaryProvider, SummaryRequest, SummaryRequestTooLargeError, SummaryResult } from "./summary";
 
 /** Summary requests can legitimately take a while on long transcripts, but must not hang forever. */
 const SUMMARY_REQUEST_TIMEOUT_MS = 120_000;
@@ -18,8 +18,16 @@ export interface OpenAiSummaryProviderConfig {
 
 /** Chat Completions response shape, narrowed to the fields this provider reads. */
 interface ChatCompletionsResponseBody {
-	error?: { message?: string };
+	error?: { message?: string; code?: string; type?: string };
 	choices?: { message?: { content?: string } }[];
+}
+
+function isOversizeResponse(status: number, error: ChatCompletionsResponseBody["error"], responseText: string): boolean {
+	if (status === 413) return true;
+	if (status !== 400 && status !== 422) return false;
+
+	const detail = `${error?.code ?? ""} ${error?.type ?? ""} ${error?.message ?? ""} ${responseText}`;
+	return /context[_ -]length|context window|maximum context|too many tokens|(?:prompt|input).{0,40}(?:too long|too large|exceed|token limit)|token count.{0,40}exceed|request entity too large|payload too large/i.test(detail);
 }
 
 /**
@@ -69,6 +77,9 @@ export class OpenAiSummaryProvider implements SummaryProvider {
 
 		if (response.status >= 400) {
 			const detail = json?.error?.message ?? response.text;
+			if (isOversizeResponse(response.status, json?.error, response.text)) {
+				throw new SummaryRequestTooLargeError(`Summary request exceeds the model's input limit: ${detail}`);
+			}
 			throw new Error(`Summary generation failed (HTTP ${response.status}): ${detail}`);
 		}
 
