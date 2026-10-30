@@ -38,7 +38,8 @@ This plugin is built around avoiding those failure modes specifically:
 - **Speaking language hint** - tell Whisper what language you're speaking (or leave it on auto-detect) to improve transcription accuracy and speed, especially on short or accented recordings.
 - **Optional transcript cleanup pass** - an LLM pass that removes filler words, false starts, and grammar mistakes before the transcript is saved or summarized, without changing its meaning.
 - **Custom vocabulary hints** - feed the transcription provider a list of names, jargon, or project terms to reduce misrecognition.
-- **Configurable output layout** - summary at your cursor or in a new note, transcript in the same note or a dedicated file, each in its own configurable vault folder.
+- **Configurable output layout** - summary in a note you choose or in a new note, transcript in the same note or a dedicated file, each in its own configurable vault folder. The summary is added to your note without replacing anything already in it.
+- **Move freely during a meeting** - by default the summary goes back to the note you started recording in, even if you've opened other notes since. You can instead use the note open when you stop, or pick a note from a list each time (when recording stops, or when you run **Transcribe & summarize** on an audio file).
 - **Silence auto-stop and max-duration backstop** - stop worrying about leaving a recording running after everyone's left.
 - **Silent-recording warning** - if a recording or existing audio file has no detectable signal, you're warned before it's sent off for transcription, with the option to proceed anyway.
 - **Cancel anytime** - stop an in-progress transcription or summary from the command palette; the audio you already have stays saved either way.
@@ -49,7 +50,7 @@ This plugin is built around avoiding those failure modes specifically:
 1. Install the plugin (see below) and enable it in Obsidian's Community Plugins settings.
 2. Open **Settings → AI Transcribe and Summary** and add an API key for your chosen transcription provider (Whisper/OpenRouter is the default) and summary provider.
 3. Click the microphone icon in the ribbon, or run **AI Transcribe and Summary: Start recording** from the command palette.
-4. When you're done, stop the recording. The audio is saved and transcribed automatically; if summary generation is enabled, the summary lands at your cursor if you have a note open, or in a new note otherwise.
+4. When you're done, stop the recording. The audio is saved and transcribed automatically. If summary generation is enabled, the summary goes into the note you had open when you started recording - at your cursor if that note is in front of you when the summary is ready, otherwise at the end of the note. If no note was open, it goes into a new note instead. To change which note is used, see **Add summary to** in the settings.
 
 To process an audio file you already have in your vault, right-click it and choose **Transcribe & summarize** (or run **AI Transcribe and Summary: Transcribe & summarize active file** from the command palette if it's already open). To summarize a note's text directly, without any audio, right-click the note and choose **Summarize note**, or run **AI Transcribe and Summary: Summarize note** from the command palette with that note active.
 

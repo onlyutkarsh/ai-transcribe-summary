@@ -63,18 +63,53 @@ export function validateSummaryProviderConfig(settings: AiTranscribeSummarySetti
 	return undefined;
 }
 
+/** A note listed first in the summary-note picker, with why it's suggested - `reason` is shown to the user. */
+export interface SuggestedNote {
+	file: TFile;
+	reason: string;
+}
+
+/** Where a summary goes: a known note (`file` undefined meaning a new note), or ask the user, suggesting `suggested` first. */
+export type SummaryTarget = { kind: "note"; file: TFile | undefined } | { kind: "ask"; suggested: SuggestedNote[] };
+
+/**
+ * Applies settings.summaryTargetNote. `startedIn` is the note open when a live recording started -
+ * undefined for a right-click run on an existing audio file, which has no start, so there every
+ * choice except "ask" resolves to `openNow` (the note open when it was clicked).
+ */
+export function resolveSummaryTarget(
+	settings: Pick<AiTranscribeSummarySettings, "generateSummary" | "summaryPlacement" | "summaryTargetNote">,
+	notes: { startedIn: TFile | undefined; openNow: TFile | undefined }
+): SummaryTarget {
+	// Asked only when a summary will actually be written into a note - otherwise the answer is unused.
+	if (settings.summaryTargetNote === "ask" && settings.generateSummary && settings.summaryPlacement === "active-note") {
+		const suggested: SuggestedNote[] = [];
+		if (notes.startedIn) suggested.push({ file: notes.startedIn, reason: "open when recording started" });
+		if (notes.openNow && notes.openNow !== notes.startedIn) suggested.push({ file: notes.openNow, reason: "open now" });
+		return { kind: "ask", suggested };
+	}
+	// "recording-start" still falls back to the note open now when nothing was open at start -
+	// e.g. the user started recording first and only then created/opened the meeting note.
+	return { kind: "note", file: settings.summaryTargetNote === "recording-start" ? (notes.startedIn ?? notes.openNow) : notes.openNow };
+}
+
 /**
  * Runs audio -> transcript -> (optionally) summary and writes the output.
  * Shared by the live-recording stop handler and the right-click "Transcribe
- * & summarize" retry action; both pass the markdown note the user was last
- * editing (if any) via `options.targetView`, so the result lands at the
- * cursor there, falling back to a new note in the summary folder when
- * `targetView` is undefined (nothing was ever open). The caller must resolve
- * this itself from a live-updated cache rather than a workspace lookup taken
- * at call time - opening the right-click context menu moves the active leaf
- * to the file explorer before the click handler runs, so a lookup done here
- * (e.g. `workspace.activeEditor`/`getActiveViewOfType`) would already be too
- * late even though a note is still open on screen.
+ * & summarize" retry action; both pass the note the result belongs to via
+ * `options.targetFile` (for a recording, the note open when it started), so
+ * the result lands in that note even if the user has since navigated away -
+ * falling back to a new note in the summary folder when it's undefined
+ * (nothing was open) or has been deleted. A `TFile` rather than a
+ * `MarkdownView`, since Obsidian reuses one view per tab: navigating within
+ * the tab would silently retarget a held view to whatever note is now shown.
+ * The caller must resolve this itself from a live-updated cache rather than
+ * a workspace lookup taken at call time - opening the right-click context
+ * menu moves the active leaf to the file explorer before the click handler
+ * runs, so a lookup done here (e.g. `workspace.activeEditor`) would already
+ * be too late even though a note is still open on screen. May be a promise
+ * that's still pending (the user is still picking a note) - it's only
+ * awaited right before writing, so transcription and summary run meanwhile.
  *
  * settings.transcribeAudio, settings.generateSummary, and settings.cleanupTranscript
  * are independent toggles - any combination is valid:
@@ -87,13 +122,13 @@ export function validateSummaryProviderConfig(settings: AiTranscribeSummarySetti
  *   for the kept transcript and/or the summary, regardless of the other two toggles.
  * - When both transcribeAudio and generateSummary are off, nothing downstream of
  *   transcription would ever be written, so transcription is skipped entirely and
- *   the recording is audio-only (targetView has no effect in that case).
+ *   the recording is audio-only (targetFile has no effect in that case).
  */
 export async function runTranscribeAndSummarizePipeline(
 	app: App,
 	settings: AiTranscribeSummarySettings,
 	source: AudioSource,
-	options: { targetView: MarkdownView | undefined; onProgress?: ProgressCallback; signal?: AbortSignal }
+	options: { targetFile: TFile | undefined | Promise<TFile | undefined>; onProgress?: ProgressCallback; signal?: AbortSignal }
 ): Promise<void> {
 	const onProgress = options.onProgress ?? (() => {});
 	const signal = options.signal;
@@ -102,7 +137,7 @@ export async function runTranscribeAndSummarizePipeline(
 		baseName: source.baseName,
 		mimeType: source.mimeType,
 		sizeBytes: source.blob.size,
-		targetViewFile: options.targetView?.file?.path ?? null,
+		targetFile: options.targetFile instanceof Promise ? "(being picked)" : (options.targetFile?.path ?? null),
 	});
 
 	const configError = validatePipelineConfig(settings);
@@ -116,14 +151,6 @@ export async function runTranscribeAndSummarizePipeline(
 		new Notice(source.audioFile ? `Recording saved as "${source.baseName}" - transcription is off.` : `Recording finished - transcription is off, and "Save audio file" is also off, so nothing was kept.`);
 		return;
 	}
-
-	// Captured up front, not after the transcription/summary calls - the user may switch notes
-	// while those are in flight, and the result should land in the note that was active when
-	// recording stopped, not whatever happens to be active when the LLM calls finish.
-	// targetView comes from a cache in main.ts that can outlive the note it points to (closed
-	// tab, deleted file) - confirm its leaf is still open before trusting it as an insert target.
-	const targetLeafStillOpen = options.targetView && app.workspace.getLeavesOfType("markdown").some((leaf) => leaf.view === options.targetView);
-	const activeView = targetLeafStillOpen ? options.targetView : undefined;
 
 	const transcriptionProvider = createTranscriptionProvider(settings);
 	logDebug("transcription provider resolved", transcriptionProvider.id);
@@ -144,8 +171,6 @@ export async function runTranscribeAndSummarizePipeline(
 	if (transcription.repetitionWarning) {
 		new Notice(`Warning: possible repetition-loop artifact detected in the transcript for "${source.baseName}".`);
 	}
-
-	const audioLinkMarkdown = source.audioFile ? buildAudioLinkMarkdown(app, source.audioFile, activeView?.file?.path ?? "") : "";
 
 	// From here on (cleanup, summary, writing the note) a failure would otherwise discard a
 	// transcript that already cost a real transcription API call to produce. Catch it, save the
@@ -205,9 +230,14 @@ export async function runTranscribeAndSummarizePipeline(
 		const summaryResult = await summarizeLongTranscript(summaryProvider, { transcript: transcriptText, prompt: settings.summaryPrompt, signal }, onProgress);
 		logDebug("summary finished", { durationMs: Date.now() - summarizeStartedAt, summaryLength: summaryResult.summary.length });
 
+		if (options.targetFile instanceof Promise) onProgress("Waiting for you to choose a note");
+		const requestedFile = await options.targetFile;
+
 		// Audio link travels with the summary, not the transcript - it belongs in the main note
 		// (where the summary lands) even when transcript placement is "dedicated-file" and the
-		// transcript itself goes to a separate file the user may not open right away.
+		// transcript itself goes to a separate file the user may not open right away. Built only
+		// now because the link is relative to whichever note it's written into.
+		const audioLinkMarkdown = source.audioFile ? buildAudioLinkMarkdown(app, source.audioFile, requestedFile?.path ?? "") : "";
 		const summaryMarkdown = `${audioLinkMarkdown}${buildSummaryMarkdown(summaryResult.summary, transcription.repetitionWarning)}`;
 
 		// Same-note insertion only includes the transcript when transcribeAudio is on - otherwise
@@ -215,25 +245,22 @@ export async function runTranscribeAndSummarizePipeline(
 		const includeTranscriptInline = settings.transcribeAudio && settings.transcriptPlacement === "same-note";
 
 		onProgress("Saving results");
-		// Re-checked here rather than trusting the activeView captured above: transcription/cleanup/summary
-		// are slow async calls, and the user may have switched away from that note (or it may just be a stale
-		// background tab) by the time we're ready to write. Inserting into a note that's no longer on screen
-		// would silently "lose" the summary from the user's point of view, so only insert inline when that
-		// note is still the one actually focused right now; otherwise fall back to a new file and say why.
-		// Skipped entirely when summaryPlacement is "dedicated-file" - the user has opted out of
-		// active-note insertion regardless of what's currently focused.
-		const stillActiveView =
-			settings.summaryPlacement === "active-note" && activeView && app.workspace.getActiveViewOfType(MarkdownView) === activeView ? activeView : undefined;
-		if (stillActiveView) {
-			writeIntoActiveNote(stillActiveView, summaryMarkdown, includeTranscriptInline ? transcriptMarkdown : undefined);
+		// Re-resolved here rather than at the start: transcription/cleanup/summary are slow async calls,
+		// and the target note may have been deleted meanwhile. A rename keeps the same TFile (with an
+		// updated path), so identity against the vault's current lookup covers both cases.
+		const targetFile =
+			settings.summaryPlacement === "active-note" && requestedFile && app.vault.getFileByPath(requestedFile.path) === requestedFile ? requestedFile : undefined;
+		if (targetFile) {
+			await writeIntoTargetNote(app, targetFile, summaryMarkdown, includeTranscriptInline ? transcriptMarkdown : undefined);
+			new Notice(`Summary added to "${targetFile.basename}".`);
 		} else {
-			if (settings.summaryPlacement === "active-note" && activeView) {
-				new Notice(`Couldn't detect the note to insert into - creating a new file in "${settings.summaryFolder}" instead.`);
+			if (settings.summaryPlacement === "active-note" && requestedFile) {
+				new Notice(`The note "${requestedFile.basename}" no longer exists - creating a new file in "${settings.summaryFolder}" instead.`);
 			}
 			await writeIntoNewNote(app, settings, source.baseName, summaryMarkdown, includeTranscriptInline ? transcriptMarkdown : undefined);
+			new Notice(`Summary ready for "${source.baseName}".`);
 		}
 
-		new Notice(`Summary ready for "${source.baseName}".`);
 		logDebug("pipeline finished (summary)");
 	} catch (error) {
 		const cancelled = error instanceof RequestAbortedError;
@@ -362,12 +389,27 @@ function buildAudioLinkMarkdown(app: App, audioFile: TFile, sourcePath: string):
 	return `!${link}\n\n`;
 }
 
-/** `transcriptMarkdown` is undefined whenever the raw transcript shouldn't be appended - transcribeAudio is off, or transcriptPlacement is "dedicated-file" (already written to its own file by the caller). */
-function writeIntoActiveNote(view: MarkdownView, summaryMarkdown: string, transcriptMarkdown: string | undefined): void {
-	const editor = view.editor;
+/**
+ * Inserts at the cursor when the note is the one currently focused (the user is looking at it,
+ * so the cursor is a deliberate position); otherwise appends to the end of the file - a cursor
+ * in a background tab, or no editor at all, isn't a position the user chose.
+ * `transcriptMarkdown` is undefined whenever the raw transcript shouldn't be appended -
+ * transcribeAudio is off, or transcriptPlacement is "dedicated-file" (already written to its own
+ * file by the caller).
+ */
+export async function writeIntoTargetNote(app: App, file: TFile, summaryMarkdown: string, transcriptMarkdown: string | undefined): Promise<void> {
 	const insertion = transcriptMarkdown !== undefined ? `${summaryMarkdown}\n${transcriptMarkdown}` : summaryMarkdown;
-	editor.replaceSelection(insertion);
-	logDebug("summary inserted into active note", { path: view.file?.path ?? null });
+	const activeView = app.workspace.getActiveViewOfType(MarkdownView);
+	if (activeView?.file === file) {
+		// Inserted after any selection rather than replacing it - a selection left over from
+		// note-taking during the meeting isn't a request to overwrite that text.
+		const editor = activeView.editor;
+		editor.replaceRange(insertion, editor.getCursor("to"));
+		logDebug("summary inserted at cursor in target note", { path: file.path });
+		return;
+	}
+	await app.vault.process(file, (data) => (data.trim() ? `${data.trimEnd()}\n\n${insertion}` : insertion));
+	logDebug("summary appended to target note", { path: file.path });
 }
 
 async function writeIntoNewNote(app: App, settings: AiTranscribeSummarySettings, baseName: string, summaryMarkdown: string, transcriptMarkdown: string | undefined): Promise<string> {

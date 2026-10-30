@@ -62,6 +62,9 @@ export type TranscriptPlacement = "same-note" | "dedicated-file";
 
 export type SummaryPlacement = "active-note" | "dedicated-file";
 
+/** Which note a live recording's summary goes into under "active-note" placement. */
+export type SummaryTargetNote = "recording-start" | "recording-stop" | "ask";
+
 /** Recording bitrate in kbps. Kept as a closed set - MediaRecorder accepts arbitrary values, but only these are exposed. */
 export type AudioBitrateKbps = 32 | 64 | 128;
 
@@ -178,11 +181,16 @@ export interface AiTranscribeSummarySettings {
 	transcriptFolder: string;
 
 	// Output: summary
-	/** "active-note" inserts at the cursor in the active note when one is open (live recording, or a
-	 * right-click retry with a markdown note still open), falling back to a new note in summaryFolder
-	 * when there isn't one. "dedicated-file" always writes a new note in summaryFolder, regardless of
-	 * what's open. */
+	/** "active-note" writes into a note the user had open (see summaryTargetNote for which one),
+	 * falling back to a new note in summaryFolder when there isn't one. "dedicated-file" always writes
+	 * a new note in summaryFolder, regardless of what's open. */
 	summaryPlacement: SummaryPlacement;
+	/** Only under "active-note". A right-click run on an existing audio file has no start/stop, so it
+	 * uses the note open when it was clicked - unless "ask", which prompts there too. Defaults to
+	 * "recording-start" so the user can navigate freely during a meeting without the summary following
+	 * them. "ask" prompts with a note picker at stop time - while the user is still present - rather
+	 * than when the summary is ready minutes later. */
+	summaryTargetNote: SummaryTargetNote;
 	summaryFolder: string;
 }
 
@@ -232,6 +240,7 @@ export const DEFAULT_SETTINGS: AiTranscribeSummarySettings = {
 	transcriptFolder: "_meetings/transcripts",
 
 	summaryPlacement: "active-note",
+	summaryTargetNote: "recording-start",
 	summaryFolder: "_meetings",
 };
 
@@ -332,6 +341,7 @@ const VISIBILITY_DRIVING_KEYS = new Set<string>([
 	"generateSummary",
 	"cleanupTranscript",
 	"saveAudioFile",
+	"summaryPlacement",
 	"reuseWhisperKeyForSummary.openai",
 	"reuseWhisperKeyForSummary.openrouter",
 	"reuseWhisperKeyForSummary.gemini",
@@ -429,6 +439,8 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 				return settings.summaryFolder;
 			case "summaryPlacement":
 				return settings.summaryPlacement;
+			case "summaryTargetNote":
+				return settings.summaryTargetNote;
 			default:
 				return undefined;
 		}
@@ -555,6 +567,9 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 				break;
 			case "summaryPlacement":
 				settings.summaryPlacement = value as SummaryPlacement;
+				break;
+			case "summaryTargetNote":
+				settings.summaryTargetNote = value as SummaryTargetNote;
 				break;
 			default:
 				return;
@@ -840,7 +855,7 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 				},
 				{
 					name: "Summary placement",
-					desc: "'Active note' inserts the summary at the cursor in the note that was open when recording stopped, falling back to a new note in the summary folder below when there isn't one (nothing open, or a right-click 'Transcribe & summarize' retry run without a note focused). 'Dedicated file' always writes a new note in the summary folder, regardless of what's open.",
+					desc: "'Active note' adds the summary to a note you had open (choose which one below) - at the cursor if that note is in front of you when the summary is ready, otherwise at the end of the note. Falls back to a new note in the summary folder below when there isn't one (nothing open, the note was deleted, or a right-click 'Transcribe & summarize' run without a note open). 'Dedicated file' always writes a new note in the summary folder, regardless of what's open.",
 					visible: () => this.plugin.settings.generateSummary,
 					control: {
 						type: "dropdown",
@@ -852,8 +867,22 @@ export class AiTranscribeSummarySettingTab extends PluginSettingTab {
 					},
 				},
 				{
+					name: "Add summary to",
+					desc: "Which note gets the summary of a recording. 'Note open when recording started' lets you move between notes during the meeting - the summary still goes back to the note you started in. 'Note open when recording stopped' uses whichever note you're on when you stop. 'Ask me each time' lets you pick any note, or create a new one, when recording stops. If no note was open when recording started, the note open when it stopped is used. Right-click 'Transcribe & summarize' on an audio file uses the note open when you run it, or asks you if 'Ask me each time' is chosen. The summary is always added without replacing anything already in the note.",
+					visible: () => this.plugin.settings.generateSummary && this.plugin.settings.summaryPlacement === "active-note",
+					control: {
+						type: "dropdown",
+						key: "summaryTargetNote",
+						options: {
+							"recording-start": "Note open when recording started",
+							"recording-stop": "Note open when recording stopped",
+							ask: "Ask me each time",
+						},
+					},
+				},
+				{
 					name: "Summary folder",
-					desc: "Vault folder used when summary placement is 'Dedicated file', or as the fallback when it's 'Active note' but no active note was detected (the new note is named \"<audio file name>-summary\"). If transcript placement above is 'Same note', the transcript follows the summary into this new note too. Not used when summary generation is off - the transcript then always goes to the transcript folder below instead.",
+					desc: "Vault folder used when summary placement is 'Dedicated file', or as the fallback when it's 'Active note' but there's no note to add it to (the new note is named \"<audio file name>-summary\"). If transcript placement above is 'Same note', the transcript follows the summary into this new note too. Not used when summary generation is off - the transcript then always goes to the transcript folder below instead.",
 					control: {
 						type: "folder",
 						key: "summaryFolder",

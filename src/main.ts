@@ -1,4 +1,4 @@
-import { App, Editor, MarkdownView, Menu, Modal, normalizePath, Notice, Plugin, setIcon, Setting, TAbstractFile, TFile, TFolder } from "obsidian";
+import { App, Editor, FuzzyMatch, FuzzySuggestModal, MarkdownView, Menu, Modal, normalizePath, Notice, Plugin, setIcon, Setting, TAbstractFile, TFile, TFolder } from "obsidian";
 import { AudioRecorder, isRecordingSilent, LEVEL_BAND_COUNT, RecordingResult } from "./audio/recorder";
 import {
 	AudioSource,
@@ -8,8 +8,11 @@ import {
 	needsTranscription,
 	RequestAbortedError,
 	resolveNonCollidingPathWithExtension,
+	resolveSummaryTarget,
 	runSummarizeTextPipeline,
 	runTranscribeAndSummarizePipeline,
+	SuggestedNote,
+	SummaryTarget,
 } from "./pipeline";
 import { AiTranscribeSummarySettingTab, AiTranscribeSummarySettings, DEFAULT_SETTINGS } from "./settings";
 
@@ -186,6 +189,58 @@ class SilentRecordingConfirmModal extends Modal {
 	}
 }
 
+type SummaryNotePickerItem = { kind: "new" } | { kind: "note"; file: TFile; reason?: string };
+
+/**
+ * Resolves with the picked note, or undefined for a new note - chosen explicitly via the "Create a
+ * new note" entry or by dismissing, so Esc is a real choice rather than an error. Suggested notes
+ * come first so the likely pick is a single Enter; the new-note entry follows them rather than
+ * leading, but stays visible without scrolling.
+ */
+class SummaryNotePickerModal extends FuzzySuggestModal<SummaryNotePickerItem> {
+	private resolve!: (file: TFile | undefined) => void;
+	readonly picked = new Promise<TFile | undefined>((resolve) => (this.resolve = resolve));
+
+	constructor(app: App, private suggested: SuggestedNote[], private summaryFolder: string) {
+		super(app);
+		this.setPlaceholder("Choose a note for the summary");
+	}
+
+	getItems(): SummaryNotePickerItem[] {
+		const suggestedFiles = new Set(this.suggested.map((note) => note.file));
+		const rest = this.app.vault
+			.getMarkdownFiles()
+			.filter((file) => !suggestedFiles.has(file))
+			.sort((a, b) => b.stat.mtime - a.stat.mtime);
+		return [
+			...this.suggested.map((note): SummaryNotePickerItem => ({ kind: "note", file: note.file, reason: note.reason })),
+			{ kind: "new" },
+			...rest.map((file): SummaryNotePickerItem => ({ kind: "note", file })),
+		];
+	}
+
+	getItemText(item: SummaryNotePickerItem): string {
+		return item.kind === "new" ? `Create a new note in "${this.summaryFolder}"` : item.file.path;
+	}
+
+	renderSuggestion(match: FuzzyMatch<SummaryNotePickerItem>, el: HTMLElement) {
+		super.renderSuggestion(match, el);
+		if (match.item.kind === "note" && match.item.reason) {
+			el.createSpan({ cls: "ai-transcribe-summary-picker-reason", text: match.item.reason });
+		}
+	}
+
+	onChooseItem(item: SummaryNotePickerItem) {
+		this.resolve(item.kind === "note" ? item.file : undefined);
+	}
+
+	onClose() {
+		// Obsidian closes the modal *before* calling onChooseItem, so resolving undefined here
+		// synchronously would beat the pick - defer it, and the later call becomes a no-op.
+		window.setTimeout(() => this.resolve(undefined), 0);
+	}
+}
+
 export default class AiTranscribeSummaryPlugin extends Plugin {
 	declare settings: AiTranscribeSummarySettings;
 
@@ -214,6 +269,9 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 	 * though a note is still open on screen. This cache survives that.
 	 */
 	private lastMarkdownView: MarkdownView | undefined;
+
+	/** Note open when the current recording started - pinned at start so that, with summaryTargetNote "recording-start", the summary goes there even if the user navigates elsewhere during the meeting (e.g. to look things up). */
+	private recordingTargetFile: TFile | undefined;
 
 	/** Unregisters this plugin's Notebook Navigator file-menu callback, if that integration was set up in onload(). */
 	private notebookNavigatorMenuDispose: (() => void) | undefined;
@@ -387,6 +445,7 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 	}
 
 	private async transcribeAndSummarizeFile(file: TFile): Promise<void> {
+		const target = resolveSummaryTarget(this.settings, { startedIn: undefined, openNow: this.lastMarkdownView?.file ?? undefined });
 		let blob: Blob;
 		try {
 			blob = new Blob([await this.app.vault.readBinary(file)], { type: mimeTypeForExtension(file.extension) });
@@ -394,7 +453,7 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 			this.reportPipelineError("transcribe & summarize", error);
 			return;
 		}
-		await this.runPipelineWithSilenceCheck({ blob, mimeType: blob.type, baseName: file.basename, audioFile: file });
+		await this.runPipelineWithSilenceCheck({ blob, mimeType: blob.type, baseName: file.basename, audioFile: file }, target);
 	}
 
 	/** Logs and surfaces a pipeline failure - a user-initiated stop gets a neutral Notice instead of the usual red "failed" one. */
@@ -527,6 +586,7 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 	private async startRecording() {
 		this.transitioning = true;
 		this.deadMicWarned = false;
+		this.recordingTargetFile = this.lastMarkdownView?.file ?? undefined;
 		try {
 			await this.recorder.start({
 				microphoneDeviceId: this.settings.microphoneDeviceId,
@@ -613,6 +673,8 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 	private async stopRecording() {
 		this.transitioning = true;
 		this.stopTimer();
+		const target = resolveSummaryTarget(this.settings, { startedIn: this.recordingTargetFile, openNow: this.lastMarkdownView?.file ?? undefined });
+		this.recordingTargetFile = undefined;
 
 		let result: RecordingResult;
 		try {
@@ -659,12 +721,15 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 			);
 		}
 
-		await this.runPipelineWithSilenceCheck({
-			blob: result.blob,
-			mimeType: result.mimeType,
-			baseName: savedFile?.basename ?? `meeting ${formatTimestampForFilename(new Date())}`,
-			audioFile: savedFile,
-		});
+		await this.runPipelineWithSilenceCheck(
+			{
+				blob: result.blob,
+				mimeType: result.mimeType,
+				baseName: savedFile?.basename ?? `meeting ${formatTimestampForFilename(new Date())}`,
+				audioFile: savedFile,
+			},
+			target
+		);
 	}
 
 	/**
@@ -674,12 +739,12 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 	 * with a silent clip: a recording captured with no signal, or a pre-existing audio file
 	 * that's blank/corrupted.
 	 */
-	private async runPipelineWithSilenceCheck(source: AudioSource) {
+	private async runPipelineWithSilenceCheck(source: AudioSource, target: SummaryTarget) {
 		// The check exists to protect the transcription API call from being wasted on a silent/dead
 		// clip - when nothing downstream (transcript, cleanup, summary) needs transcription at all,
 		// there's no such call to protect, so skip straight through.
 		if (!needsTranscription(this.settings)) {
-			await this.runPipeline(source);
+			await this.runPipeline(source, target);
 			return;
 		}
 
@@ -699,7 +764,7 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 			new SilentRecordingConfirmModal(
 				this.app,
 				undecodable,
-				() => void this.runPipeline(source),
+				() => void this.runPipeline(source, target),
 				() => {
 					/* discarded - raw audio (if saveAudioFile is on, or the file already in the vault) is untouched */
 				}
@@ -707,20 +772,27 @@ export default class AiTranscribeSummaryPlugin extends Plugin {
 			return;
 		}
 
-		await this.runPipeline(source);
+		await this.runPipeline(source, target);
 	}
 
-	private async runPipeline(source: AudioSource) {
+	private async runPipeline(source: AudioSource, target: SummaryTarget) {
 		const { jobId, signal } = this.beginPipelineJob();
+		// Opened here, after the silence check, so it never stacks on the silent-recording modal - and
+		// the pipeline starts without waiting for an answer, only awaiting it right before writing.
+		const picker = target.kind === "ask" ? new SummaryNotePickerModal(this.app, target.suggested, this.settings.summaryFolder) : undefined;
+		picker?.open();
+		const targetFile = target.kind === "ask" ? picker?.picked : target.file;
 		try {
 			await runTranscribeAndSummarizePipeline(this.app, this.settings, source, {
-				targetView: this.lastMarkdownView,
+				targetFile,
 				onProgress: (status) => this.showPipelineProgress(jobId, status),
 				signal,
 			});
 		} catch (error) {
 			this.reportPipelineError("transcribe & summarize", error);
 		} finally {
+			// A failed or stopped job leaves an unanswered picker with nothing left to decide.
+			picker?.close();
 			this.endPipelineJob(jobId);
 		}
 	}
